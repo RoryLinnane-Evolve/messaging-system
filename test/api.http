@@ -1,0 +1,25 @@
+@baseUrl = http://localhost:8080
+@token = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy93cy8yMDA1LzA1L2lkZW50aXR5L2NsYWltcy9uYW1laWRlbnRpZmllciI6IjM2ZmMwYmQ2LTM3ZmMtNDdlYy04MWUxLWIyMjkzYTg0NWYxYiIsImh0dHA6Ly9zY2hlbWFzLnhtbHNvYXAub3JnL3dzLzIwMDUvMDUvaWRlbnRpdHkvY2xhaW1zL25hbWUiOiJhbGljZSIsImV4cCI6MTc3OTMxNzQyMX0.DncSIt1B2L1F9vh-ajXobq2VVnWK1PaSD4k78NFVUHA
+
+### Sign up
+POST {{baseUrl}}/api/auth/sign-up
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "Password123!",
+  "publicKey": "base64encodedpublickey=="
+}
+
+### Login
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{
+  "username": "alice",
+  "password": "Password123!"
+}
+
+### Logout (requires token)
+POST {{baseUrl}}/api/auth/logout
+Authorization: Bearer {{token}}

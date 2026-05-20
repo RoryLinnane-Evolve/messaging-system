@@ -1,0 +1,25 @@
+.idea
+**/obj
+**/bin
+*.slnx
+*.DotSettings.user
+.claude
+resources
+.env
+**/build
+
+# Default ignored files
+/shelf/
+/workspace.xml
+# Rider ignored files
+/contentModel.xml
+/projectSettingsUpdater.xml
+/modules.xml
+/.idea.messaging-system.iml
+# Editor-based HTTP Client requests
+/httpRequests/
+# Ignored default folder with query files
+/queries/
+# Datasource local storage ignored files
+/dataSources/
+/dataSources.local.xml
