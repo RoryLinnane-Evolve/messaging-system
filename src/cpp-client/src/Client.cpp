@@ -11,6 +11,18 @@
 using json = nlohmann::json;
 
 // ---------------------------------------------------------------------------
+// RAII CURL handle
+// ---------------------------------------------------------------------------
+struct CurlHandle {
+    CURL* h;
+    CurlHandle() : h(curl_easy_init()) {
+        if (!h) throw std::runtime_error("curl_easy_init failed");
+    }
+    ~CurlHandle() { curl_easy_cleanup(h); }
+    operator CURL*() const { return h; }
+};
+
+// ---------------------------------------------------------------------------
 // CURL write callback
 // ---------------------------------------------------------------------------
 static size_t curlWrite(char* ptr, size_t size, size_t nmemb, void* userdata) {
@@ -67,34 +79,15 @@ Client::Client(std::string baseUrl)
     if (sodium_init() < 0)
         throw std::runtime_error("libsodium init failed");
 
-    _tofuPath = std::string(std::getenv("HOME") ? std::getenv("HOME") : ".") + "/.securemsg_tofu.json";
-    loadOrGenerateKeys();
+    const char* home = std::getenv("HOME");
+    std::string homeDir = home ? home : ".";
+    _tofuPath = homeDir + "/.securemsg_tofu.json";
+    _keys = std::make_unique<KeyStore>(KeyStore::load(homeDir + "/.securemsg_keys.bin"));
     loadTofu();
 }
 
-// ---------------------------------------------------------------------------
-// Key persistence
-// ---------------------------------------------------------------------------
-std::string Client::keysPath() const {
-    return std::string(std::getenv("HOME") ? std::getenv("HOME") : ".") + "/.securemsg_keys.bin";
-}
-
-void Client::loadOrGenerateKeys() {
-    std::ifstream f(keysPath(), std::ios::binary);
-    if (f) {
-        f.read(reinterpret_cast<char*>(_pk), crypto_box_PUBLICKEYBYTES);
-        f.read(reinterpret_cast<char*>(_sk), crypto_box_SECRETKEYBYTES);
-        if (f.gcount() == crypto_box_SECRETKEYBYTES)
-            return;
-    }
-    crypto_box_keypair(_pk, _sk);
-    std::ofstream out(keysPath(), std::ios::binary);
-    out.write(reinterpret_cast<char*>(_pk), crypto_box_PUBLICKEYBYTES);
-    out.write(reinterpret_cast<char*>(_sk), crypto_box_SECRETKEYBYTES);
-}
-
 std::string Client::publicKeyB64() const {
-    return b64Encode(_pk, crypto_box_PUBLICKEYBYTES);
+    return b64Encode(_keys->publicKey().data(), crypto_box_PUBLICKEYBYTES);
 }
 
 // ---------------------------------------------------------------------------
@@ -137,9 +130,7 @@ bool Client::verifyOrPin(const std::string& user, const std::string& keyB64) {
 // ---------------------------------------------------------------------------
 std::string Client::request(const std::string& method, const std::string& path,
                              const std::string& body) {
-    CURL* curl = curl_easy_init();
-    if (!curl) throw std::runtime_error("curl_easy_init failed");
-
+    CurlHandle curl;
     std::string url = _baseUrl + path;
     std::string response;
 
@@ -172,7 +163,6 @@ std::string Client::request(const std::string& method, const std::string& path,
 
     CURLcode res = curl_easy_perform(curl);
     curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 
     if (res != CURLE_OK)
         throw std::runtime_error(std::string("curl: ") + curl_easy_strerror(res));
@@ -232,7 +222,7 @@ std::string Client::decryptMessage(const Message& msg) const {
 
     std::vector<unsigned char> plain(ct.size() - crypto_box_MACBYTES);
     if (crypto_box_open_easy(plain.data(), ct.data(), ct.size(),
-                             nonc.data(), epk.data(), _sk) != 0)
+                             nonc.data(), epk.data(), _keys->secretKey().data()) != 0)
         throw std::runtime_error("Decryption failed — not addressed to you or tampered");
 
     return std::string(plain.begin(), plain.end());
@@ -443,4 +433,22 @@ bool Client::downloadMessage(const Message& msg, const std::string& filepath) {
         std::cerr << "Download failed: " << e.what() << "\n";
         return false;
     }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket
+// ---------------------------------------------------------------------------
+void Client::connectWebSocket() {
+    // Derive WS URL from the HTTP base URL
+    std::string wsUrl = _baseUrl;
+    if (wsUrl.rfind("https://", 0) == 0)
+        wsUrl.replace(0, 8, "wss://");
+    else if (wsUrl.rfind("http://", 0) == 0)
+        wsUrl.replace(0, 7, "ws://");
+    wsUrl += "/ws?token=" + _token;
+    _ws.connect(wsUrl);
+}
+
+std::string Client::pollWebSocket() {
+    return _ws.poll();
 }

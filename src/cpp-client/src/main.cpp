@@ -1,7 +1,13 @@
 #include "Client.h"
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <sys/select.h>
+#include <time.h>
+#include <unistd.h>
+
+using json = nlohmann::json;
 
 static std::string prompt(const std::string& label) {
     std::cout << label;
@@ -83,9 +89,26 @@ static void menuMessages(Client& client) {
     }
 }
 
-static void menuSend(Client& client) {
+static void menuCreateConversation(Client& client) {
+    auto names = prompt("Participant usernames (space-separated, not including yourself): ");
+    std::vector<std::string> participants;
+    std::istringstream iss(names);
+    std::string token;
+    while (iss >> token) participants.push_back(token);
+
+    if (participants.empty()) return;
+    auto conv = client.createConversation(participants);
+    if (conv) std::cout << "Created conversation: " << conv->id << "\n";
+    else std::cout << "Failed to create conversation.\n";
+}
+
+// ---------------------------------------------------------------------------
+// Live chat — uses select() so incoming WebSocket messages print immediately
+// without blocking the user from typing.
+// ---------------------------------------------------------------------------
+static void menuLiveChat(Client& client) {
     auto convs = client.getConversations();
-    if (convs.empty()) { std::cout << "No conversations. Create one first.\n"; return; }
+    if (convs.empty()) { std::cout << "No conversations.\n"; return; }
 
     std::cout << "Conversations:\n";
     for (size_t i = 0; i < convs.size(); ++i) {
@@ -101,32 +124,89 @@ static void menuSend(Client& client) {
 
     const auto& conv = convs[idx];
 
-    // Find a participant who is not us to get their public key
+    // Resolve the recipient (other participant) for TOFU and sending
     std::string recipientUsername;
-    for (auto& p : conv.participants) {
+    for (auto& p : conv.participants)
         if (p != client.username()) { recipientUsername = p; break; }
+    if (recipientUsername.empty()) { std::cout << "No other participant.\n"; return; }
+
+    auto recipientUser = client.getUser(recipientUsername);
+    if (!recipientUser) { std::cout << "Could not fetch recipient info.\n"; return; }
+
+    // Connect WebSocket for real-time delivery
+    if (!client.wsConnected()) {
+        client.connectWebSocket();
+        // Give the background thread a moment to complete the handshake
+        struct timespec ts{0, 200'000'000};
+        nanosleep(&ts, nullptr);
     }
-    if (recipientUsername.empty()) { std::cout << "No other participant found.\n"; return; }
 
-    auto user = client.getUser(recipientUsername);
-    if (!user) { std::cout << "Could not fetch recipient.\n"; return; }
+    std::cout << "Live chat with " << recipientUsername
+              << " (conversation " << conv.id << ")\n"
+              << "Type a message and press Enter to send. Type /quit to exit.\n";
+    printSeparator();
 
-    auto text = prompt("Message: ");
-    if (client.sendMessage(conv.id, text, user->publicKey))
-        std::cout << "Sent.\n";
-}
+    // Print existing messages so the user has context
+    auto history = client.getMessages(conv.id);
+    for (auto& m : history) {
+        std::string text;
+        try { text = client.decryptMessage(m); } catch (...) { text = "[encrypted]"; }
+        std::cout << m.senderUsername << ": " << text << "\n";
+    }
+    printSeparator();
 
-static void menuCreateConversation(Client& client) {
-    auto names = prompt("Participant usernames (space-separated, not including yourself): ");
-    std::vector<std::string> participants;
-    std::istringstream iss(names);
-    std::string token;
-    while (iss >> token) participants.push_back(token);
+    std::string inputBuf;
+    std::cout << client.username() << "> " << std::flush;
 
-    if (participants.empty()) return;
-    auto conv = client.createConversation(participants);
-    if (conv) std::cout << "Created conversation: " << conv->id << "\n";
-    else std::cout << "Failed to create conversation.\n";
+    while (true) {
+        // Drain all queued WebSocket messages before blocking on stdin
+        for (std::string raw; !(raw = client.pollWebSocket()).empty(); ) {
+            try {
+                auto j = nlohmann::json::parse(raw);
+                if (j.value("type", "") == "new_message") {
+                    auto& data = j.at("data");
+                    Message m;
+                    m.id                 = data.at("id").get<std::string>();
+                    m.conversationId     = data.at("conversationId").get<std::string>();
+                    m.senderUsername     = data.value("senderUsername", "[deleted]");
+                    m.ciphertext         = data.at("ciphertext").get<std::string>();
+                    m.nonce              = data.at("nonce").get<std::string>();
+                    m.ephemeralPublicKey = data.at("ephemeralPublicKey").get<std::string>();
+                    m.timestamp          = data.value("timestamp", "");
+                    // Only show messages in this conversation from the other party
+                    if (m.conversationId == conv.id && m.senderUsername != client.username()) {
+                        std::string text;
+                        try { text = client.decryptMessage(m); } catch (...) { text = "[encrypted]"; }
+                        std::cout << "\n" << m.senderUsername << ": " << text << "\n";
+                        std::cout << client.username() << "> " << inputBuf << std::flush;
+                    }
+                }
+            } catch (...) {}
+        }
+
+        // Check if stdin has data (500 ms timeout so we keep polling WS)
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+        struct timeval tv{0, 500'000};
+        int ready = select(STDIN_FILENO + 1, &fds, nullptr, nullptr, &tv);
+
+        if (ready > 0 && FD_ISSET(STDIN_FILENO, &fds)) {
+            std::string line;
+            if (!std::getline(std::cin, line)) break; // EOF
+            if (line == "/quit") break;
+            if (line.empty()) {
+                std::cout << client.username() << "> " << std::flush;
+                continue;
+            }
+            if (client.sendMessage(conv.id, line, recipientUser->publicKey))
+                std::cout << client.username() << ": " << line << "\n";
+            else
+                std::cout << "[send failed]\n";
+            std::cout << client.username() << "> " << std::flush;
+        }
+    }
+    std::cout << "\nExited live chat.\n";
 }
 
 static void menuRevokeAccess(Client& client) {
@@ -165,7 +245,7 @@ static void mainMenu(Client& client) {
         printSeparator();
         std::cout << "Logged in as: " << client.username() << "\n"
                   << "  [1] View conversations & messages\n"
-                  << "  [2] Send a message\n"
+                  << "  [2] Chat\n"
                   << "  [3] New conversation\n"
                   << "  [4] Revoke access\n"
                   << "  [5] Account settings\n"
@@ -174,7 +254,7 @@ static void mainMenu(Client& client) {
 
         auto c = prompt("> ");
         if      (c == "1") menuMessages(client);
-        else if (c == "2") menuSend(client);
+        else if (c == "2") menuLiveChat(client);
         else if (c == "3") menuCreateConversation(client);
         else if (c == "4") menuRevokeAccess(client);
         else if (c == "5") menuAccount(client);

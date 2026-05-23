@@ -1,86 +1,93 @@
 #pragma once
-#include <string>
-#include <optional>
-#include <vector>
 #include <map>
 #include <memory>
-#include <sodium.h>
-#include "User.h"
-#include "Message.h"
+#include <optional>
+#include <string>
+#include <vector>
 #include "Conversation.h"
+#include "KeyStore.h"
+#include "Message.h"
 #include "MessageStore.h"
+#include "User.h"
+#include "WebSocketClient.h"
 
 class Client {
 public:
     explicit Client(std::string baseUrl);
 
-    // Auth
-    bool signUp(const std::string& username, const std::string& password);
-    bool login(const std::string& username, const std::string& password);
-    bool changePassword(const std::string& current, const std::string& newPass);
-    bool deleteAccount();
+    // ── Auth ─────────────────────────────────────────────────────────────────
+    [[nodiscard]] bool signUp(const std::string& username, const std::string& password);
+    [[nodiscard]] bool login(const std::string& username, const std::string& password);
+    [[nodiscard]] bool changePassword(const std::string& current, const std::string& newPass);
+    [[nodiscard]] bool deleteAccount();
 
-    // User
-    std::optional<User> getUser(const std::string& username);
+    // ── User ─────────────────────────────────────────────────────────────────
+    [[nodiscard]] std::optional<User> getUser(const std::string& username);
 
-    // Conversations
-    std::vector<Conversation> getConversations();
-    std::optional<Conversation> getConversation(const std::string& id);
-    std::optional<Conversation> createConversation(const std::vector<std::string>& usernames);
+    // ── Conversations ─────────────────────────────────────────────────────────
+    [[nodiscard]] std::vector<Conversation> getConversations();
+    [[nodiscard]] std::optional<Conversation> getConversation(const std::string& id);
+    [[nodiscard]] std::optional<Conversation> createConversation(const std::vector<std::string>& usernames);
 
-    // Messages
-    std::vector<Message> getMessages(const std::string& conversationId);
-    bool sendMessage(const std::string& conversationId, const std::string& plaintext,
-                     const std::string& recipientPublicKeyB64);
-    // Forward a message to another conversation, with TOFU check on recipient
-    bool forwardMessage(const Message& msg, const std::string& targetConversationId,
-                        const std::string& recipientUsername);
-    bool deleteMessage(const std::string& id);
-    bool revokeAccess(const std::string& conversationId, const std::string& targetUserId);
+    // ── Messages ──────────────────────────────────────────────────────────────
+    [[nodiscard]] std::vector<Message> getMessages(const std::string& conversationId);
+    [[nodiscard]] bool sendMessage(const std::string& conversationId,
+                                   const std::string& plaintext,
+                                   const std::string& recipientPublicKeyB64);
+    [[nodiscard]] bool forwardMessage(const Message& msg,
+                                      const std::string& targetConversationId,
+                                      const std::string& recipientUsername);
+    [[nodiscard]] bool deleteMessage(const std::string& id);
+    [[nodiscard]] bool revokeAccess(const std::string& conversationId,
+                                    const std::string& targetUserId);
+    [[nodiscard]] bool downloadMessage(const Message& msg, const std::string& filepath);
 
-    // Save decrypted message content to a local file
-    bool downloadMessage(const Message& msg, const std::string& filepath);
+    // ── Crypto ────────────────────────────────────────────────────────────────
+    [[nodiscard]] std::string decryptMessage(const Message& msg) const;
+    [[nodiscard]] std::string publicKeyB64() const;
 
-    // Crypto: decrypt a message addressed to this client
-    std::string decryptMessage(const Message& msg) const;
+    // ── WebSocket ─────────────────────────────────────────────────────────────
+    // Connect the real-time channel after login.
+    void connectWebSocket();
 
-    bool isLoggedIn() const { return !_token.empty(); }
-    const std::string& username() const { return _username; }
-    MessageStore& store() { return *_store; }
+    // Poll for an incoming real-time message; returns "" if none queued.
+    [[nodiscard]] std::string pollWebSocket();
 
-    std::string publicKeyB64() const;
+    [[nodiscard]] bool wsConnected() const { return _ws.isConnected(); }
+
+    // ── Accessors ─────────────────────────────────────────────────────────────
+    [[nodiscard]] bool isLoggedIn() const { return !_token.empty(); }
+    [[nodiscard]] const std::string& username() const { return _username; }
+    [[nodiscard]] MessageStore& store() { return *_store; }
 
 private:
     std::string _baseUrl;
     std::string _token;
     std::string _username;
 
-    unsigned char _pk[crypto_box_PUBLICKEYBYTES];
-    unsigned char _sk[crypto_box_SECRETKEYBYTES];
+    std::unique_ptr<KeyStore>        _keys;
+    std::unique_ptr<MessageStore>    _store;
+    WebSocketClient                  _ws;
 
-    // TOFU: username -> pinned base64 public key
+    // TOFU: username → pinned base64 public key
     std::map<std::string, std::string> _tofu;
-    std::string _tofuPath;
+    std::string                        _tofuPath;
 
-    std::unique_ptr<MessageStore> _store;
+    // ── HTTP ──────────────────────────────────────────────────────────────────
+    [[nodiscard]] std::string httpGet(const std::string& path);
+    [[nodiscard]] std::string httpPost(const std::string& path, const std::string& body);
+    [[nodiscard]] std::string httpPut(const std::string& path, const std::string& body);
+    [[nodiscard]] std::string httpDelete(const std::string& path);
+    [[nodiscard]] std::string request(const std::string& method,
+                                      const std::string& path,
+                                      const std::string& body);
 
-    // HTTP
-    std::string httpGet(const std::string& path);
-    std::string httpPost(const std::string& path, const std::string& body);
-    std::string httpPut(const std::string& path, const std::string& body);
-    std::string httpDelete(const std::string& path);
-    std::string request(const std::string& method, const std::string& path,
-                        const std::string& body);
+    // ── Crypto helpers ────────────────────────────────────────────────────────
+    [[nodiscard]] std::string encryptFor(const std::string& plaintext,
+                                         const std::string& recipientPkB64);
 
-    // Crypto
-    std::string encryptFor(const std::string& plaintext, const std::string& recipientPkB64);
-
-    // TOFU
-    bool verifyOrPin(const std::string& username, const std::string& publicKeyB64);
+    // ── TOFU ──────────────────────────────────────────────────────────────────
+    [[nodiscard]] bool verifyOrPin(const std::string& user, const std::string& keyB64);
     void loadTofu();
     void saveTofu();
-
-    // Key persistence
-    void loadOrGenerateKeys();
-    std::string keysPath() const;
 };
