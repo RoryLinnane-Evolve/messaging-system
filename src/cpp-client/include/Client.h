@@ -27,7 +27,7 @@ public:
     // ── Conversations ─────────────────────────────────────────────────────────
     [[nodiscard]] std::vector<Conversation> getConversations();
     [[nodiscard]] std::optional<Conversation> getConversation(const std::string& id);
-    [[nodiscard]] std::optional<Conversation> createConversation(const std::vector<std::string>& usernames);
+    [[nodiscard]] std::optional<Conversation> createConversation(const std::string& recipientUsername);
 
     // ── Messages ──────────────────────────────────────────────────────────────
     [[nodiscard]] std::vector<Message> getMessages(const std::string& conversationId);

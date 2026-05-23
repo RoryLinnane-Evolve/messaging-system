@@ -39,7 +39,17 @@ public class ConversationController : ControllerBase
     [HttpPost]
     public async Task<ActionResult<ConversationDto>> Create(CreateConversationDto dto)
     {
-        var conversation = await _conversationService.CreateConversation(UserId, dto);
-        return CreatedAtAction(nameof(Get), new { id = conversation.Id }, conversation);
+        if (string.IsNullOrWhiteSpace(dto.RecipientUsername))
+            return BadRequest("RecipientUsername is required.");
+
+        try
+        {
+            var conversation = await _conversationService.CreateConversation(UserId, dto);
+            return CreatedAtAction(nameof(Get), new { id = conversation.Id }, conversation);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(ex.Message);
+        }
     }
 }

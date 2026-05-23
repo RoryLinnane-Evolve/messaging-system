@@ -55,28 +55,32 @@ public sealed class ConversationService : IConversationService
 
     public async Task<ConversationDto> CreateConversation(Guid userId, CreateConversationDto dto)
     {
-        var otherUsers = await _db.Users
-            .Where(u => dto.ParticipantUsernames.Contains(u.Username))
-            .ToListAsync();
+        var recipient = await _db.Users
+            .FirstOrDefaultAsync(u => u.Username == dto.RecipientUsername)
+            ?? throw new InvalidOperationException($"User '{dto.RecipientUsername}' not found.");
 
-        var creator = await _db.Users.FindAsync(userId);
+        if (recipient.Id == userId)
+            throw new InvalidOperationException("Cannot start a conversation with yourself.");
 
-        var allParticipants = otherUsers
-            .Append(creator!)
-            .DistinctBy(u => u.Id)
-            .ToList();
+        // Return existing conversation if one already exists between these two users
+        var existing = await _db.Conversations
+            .Include(c => c.Participants)
+                .ThenInclude(p => p.User)
+            .Include(c => c.Messages)
+                .ThenInclude(m => m.Sender)
+            .Where(c => c.Participants.Count == 2
+                     && c.Participants.Any(p => p.UserId == userId)
+                     && c.Participants.Any(p => p.UserId == recipient.Id))
+            .FirstOrDefaultAsync();
+
+        if (existing is not null)
+            return _mapper.Map<ConversationDto>(existing);
 
         var conversation = new Data.Entities.Conversation();
         _db.Conversations.Add(conversation);
 
-        foreach (var user in allParticipants)
-        {
-            _db.ConversationParticipants.Add(new ConversationParticipant
-            {
-                ConversationId = conversation.Id,
-                UserId = user.Id
-            });
-        }
+        _db.ConversationParticipants.Add(new ConversationParticipant { ConversationId = conversation.Id, UserId = userId });
+        _db.ConversationParticipants.Add(new ConversationParticipant { ConversationId = conversation.Id, UserId = recipient.Id });
 
         await _db.SaveChangesAsync();
 

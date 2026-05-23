@@ -19,5 +19,5 @@ public class ConversationItemDto
 
 public class CreateConversationDto
 {
-    public List<string> ParticipantUsernames { get; set; } = [];
+    public string RecipientUsername { get; set; } = string.Empty;
 }

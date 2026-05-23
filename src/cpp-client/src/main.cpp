@@ -1,10 +1,9 @@
 #include "Client.h"
 #include <nlohmann/json.hpp>
 #include <iostream>
-#include <sstream>
 #include <string>
 #include <sys/select.h>
-#include <time.h>
+#include <ctime>
 #include <unistd.h>
 
 using json = nlohmann::json;
@@ -90,41 +89,60 @@ static void menuMessages(Client& client) {
 }
 
 static void menuCreateConversation(Client& client) {
-    auto names = prompt("Participant usernames (space-separated, not including yourself): ");
-    std::vector<std::string> participants;
-    std::istringstream iss(names);
-    std::string token;
-    while (iss >> token) participants.push_back(token);
-
-    if (participants.empty()) return;
-    auto conv = client.createConversation(participants);
-    if (conv) std::cout << "Created conversation: " << conv->id << "\n";
+    auto recipient = prompt("Start conversation with (username): ");
+    if (recipient.empty()) return;
+    auto conv = client.createConversation(recipient);
+    if (conv) std::cout << "Conversation ready: " << conv->id << "\n";
     else std::cout << "Failed to create conversation.\n";
 }
 
+// Trim an ISO timestamp to just HH:MM, e.g. "2026-05-23T14:05:32Z" → "14:05"
+static std::string shortTime(const std::string& ts) {
+    // Find the 'T' separator between date and time
+    auto t = ts.find('T');
+    if (t == std::string::npos || t + 6 > ts.size()) return ts;
+    return ts.substr(t + 1, 5); // "HH:MM"
+}
+
+// ANSI helpers
+static const char* BOLD  = "\033[1m";
+static const char* DIM   = "\033[2m";
+static const char* RESET = "\033[0m";
+// Clear the current terminal line (wipes the input prompt before printing)
+static const char* CLEAR_LINE = "\r\033[2K";
+
+static void printMessage(const std::string& time, const std::string& sender,
+                          const std::string& text, bool isSelf) {
+    // Dim the timestamp, bold the sender name
+    std::cout << DIM << time << RESET << "  "
+              << BOLD << sender << RESET << ": "
+              << text << "\n";
+    (void)isSelf; // reserved for future colour support
+}
+
 // ---------------------------------------------------------------------------
-// Live chat — uses select() so incoming WebSocket messages print immediately
-// without blocking the user from typing.
+// Chat — real-time via WebSocket, select() for non-blocking stdin
 // ---------------------------------------------------------------------------
 static void menuLiveChat(Client& client) {
     auto convs = client.getConversations();
     if (convs.empty()) { std::cout << "No conversations.\n"; return; }
 
-    std::cout << "Conversations:\n";
+    std::cout << "Your conversations:\n";
     for (size_t i = 0; i < convs.size(); ++i) {
-        std::cout << "  [" << i << "] ";
-        for (auto& p : convs[i].participants) std::cout << p << " ";
-        std::cout << "\n";
+        // Show the other participant's name, not our own
+        std::string other;
+        for (auto& p : convs[i].participants)
+            if (p != client.username()) { other = p; break; }
+        std::cout << "  [" << i << "] " << other << "\n";
     }
 
-    auto idxStr = prompt("Select conversation index: ");
+    auto idxStr = prompt("Select: ");
     size_t idx;
     try { idx = std::stoul(idxStr); } catch (...) { return; }
     if (idx >= convs.size()) return;
 
     const auto& conv = convs[idx];
 
-    // Resolve the recipient (other participant) for TOFU and sending
     std::string recipientUsername;
     for (auto& p : conv.participants)
         if (p != client.username()) { recipientUsername = p; break; }
@@ -136,30 +154,31 @@ static void menuLiveChat(Client& client) {
     // Connect WebSocket for real-time delivery
     if (!client.wsConnected()) {
         client.connectWebSocket();
-        // Give the background thread a moment to complete the handshake
         struct timespec ts{0, 200'000'000};
         nanosleep(&ts, nullptr);
     }
 
-    std::cout << "Live chat with " << recipientUsername
-              << " (conversation " << conv.id << ")\n"
-              << "Type a message and press Enter to send. Type /quit to exit.\n";
+    // Header
+    std::cout << "\n" << BOLD << "  " << client.username()
+              << "  ↔  " << recipientUsername << RESET << "\n";
     printSeparator();
 
-    // Print existing messages so the user has context
+    // Print history
     auto history = client.getMessages(conv.id);
     for (auto& m : history) {
         std::string text;
         try { text = client.decryptMessage(m); } catch (...) { text = "[encrypted]"; }
-        std::cout << m.senderUsername << ": " << text << "\n";
+        printMessage(shortTime(m.timestamp), m.senderUsername, text,
+                     m.senderUsername == client.username());
     }
     printSeparator();
+    std::cout << DIM << "  /quit to exit\n" << RESET;
 
-    std::string inputBuf;
-    std::cout << client.username() << "> " << std::flush;
+    const std::string promptStr = client.username() + "> ";
+    std::cout << promptStr << std::flush;
 
     while (true) {
-        // Drain all queued WebSocket messages before blocking on stdin
+        // Drain all queued incoming WebSocket messages
         for (std::string raw; !(raw = client.pollWebSocket()).empty(); ) {
             try {
                 auto j = nlohmann::json::parse(raw);
@@ -173,18 +192,18 @@ static void menuLiveChat(Client& client) {
                     m.nonce              = data.at("nonce").get<std::string>();
                     m.ephemeralPublicKey = data.at("ephemeralPublicKey").get<std::string>();
                     m.timestamp          = data.value("timestamp", "");
-                    // Only show messages in this conversation from the other party
                     if (m.conversationId == conv.id && m.senderUsername != client.username()) {
                         std::string text;
                         try { text = client.decryptMessage(m); } catch (...) { text = "[encrypted]"; }
-                        std::cout << "\n" << m.senderUsername << ": " << text << "\n";
-                        std::cout << client.username() << "> " << inputBuf << std::flush;
+                        // Erase the dangling prompt line, print message, restore prompt
+                        std::cout << CLEAR_LINE;
+                        printMessage(shortTime(m.timestamp), m.senderUsername, text, false);
+                        std::cout << promptStr << std::flush;
                     }
                 }
             } catch (...) {}
         }
 
-        // Check if stdin has data (500 ms timeout so we keep polling WS)
         fd_set fds;
         FD_ZERO(&fds);
         FD_SET(STDIN_FILENO, &fds);
@@ -193,20 +212,28 @@ static void menuLiveChat(Client& client) {
 
         if (ready > 0 && FD_ISSET(STDIN_FILENO, &fds)) {
             std::string line;
-            if (!std::getline(std::cin, line)) break; // EOF
+            if (!std::getline(std::cin, line)) break;
             if (line == "/quit") break;
-            if (line.empty()) {
-                std::cout << client.username() << "> " << std::flush;
-                continue;
-            }
-            if (client.sendMessage(conv.id, line, recipientUser->publicKey))
-                std::cout << client.username() << ": " << line << "\n";
-            else
+            if (line.empty()) { std::cout << promptStr << std::flush; continue; }
+
+            // Move cursor up one line and erase it so the typed "user> text"
+            // is replaced by the formatted message line.
+            std::cout << "\033[1A" << CLEAR_LINE;
+
+            if (client.sendMessage(conv.id, line, recipientUser->publicKey)) {
+                // Show our own message in the same style as received ones
+                // (timestamp will be approximate — server timestamp isn't returned here)
+                auto now = std::time(nullptr);
+                char tbuf[6];
+                std::strftime(tbuf, sizeof(tbuf), "%H:%M", std::localtime(&now));
+                printMessage(tbuf, client.username(), line, true);
+            } else {
                 std::cout << "[send failed]\n";
-            std::cout << client.username() << "> " << std::flush;
+            }
+            std::cout << promptStr << std::flush;
         }
     }
-    std::cout << "\nExited live chat.\n";
+    std::cout << CLEAR_LINE << "Left chat.\n";
 }
 
 static void menuRevokeAccess(Client& client) {

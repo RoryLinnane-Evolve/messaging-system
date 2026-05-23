@@ -324,9 +324,9 @@ std::optional<Conversation> Client::getConversation(const std::string& id) {
     } catch (...) { return std::nullopt; }
 }
 
-std::optional<Conversation> Client::createConversation(const std::vector<std::string>& usernames) {
+std::optional<Conversation> Client::createConversation(const std::string& recipientUsername) {
     json body;
-    body["participantUsernames"] = usernames;
+    body["recipientUsername"] = recipientUsername;
     try {
         auto resp = httpPost("/api/conversation", body.dump());
         return parseConversation(json::parse(resp));
