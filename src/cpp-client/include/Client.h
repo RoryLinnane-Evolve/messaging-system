@@ -45,6 +45,7 @@ public:
     // ── Crypto ────────────────────────────────────────────────────────────────
     [[nodiscard]] std::string decryptMessage(const Message& msg) const;
     [[nodiscard]] std::string publicKeyB64() const;
+    [[nodiscard]] std::string signingPublicKeyB64() const;
 
     // ── WebSocket ─────────────────────────────────────────────────────────────
     // Connect the real-time channel after login.
@@ -54,6 +55,11 @@ public:
     [[nodiscard]] std::string pollWebSocket();
 
     [[nodiscard]] bool wsConnected() const { return _ws.isConnected(); }
+
+    // ── TOFU (public so UI code can pin before entering a chat) ───────────────
+    [[nodiscard]] bool verifyOrPin(const std::string& user,
+                                   const std::string& encKeyB64,
+                                   const std::string& signKeyB64);
 
     // ── Accessors ─────────────────────────────────────────────────────────────
     [[nodiscard]] bool isLoggedIn() const { return !_token.empty(); }
@@ -69,9 +75,9 @@ private:
     std::unique_ptr<MessageStore>    _store;
     WebSocketClient                  _ws;
 
-    // TOFU: username → pinned base64 public key
-    std::map<std::string, std::string> _tofu;
-    std::string                        _tofuPath;
+    // TOFU: username → { "enc": base64_enc_pk, "sign": base64_sign_pk }
+    std::map<std::string, std::map<std::string, std::string>> _tofu;
+    std::string                                                _tofuPath;
 
     // ── HTTP ──────────────────────────────────────────────────────────────────
     [[nodiscard]] std::string httpGet(const std::string& path);
@@ -87,7 +93,6 @@ private:
                                          const std::string& recipientPkB64);
 
     // ── TOFU ──────────────────────────────────────────────────────────────────
-    [[nodiscard]] bool verifyOrPin(const std::string& user, const std::string& keyB64);
     void loadTofu();
     void saveTofu();
 };

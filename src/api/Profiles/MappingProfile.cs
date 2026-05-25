@@ -14,7 +14,9 @@ public class MappingProfile : Profile
 
         CreateMap<Data.Entities.Message, MessageDto>()
             .ForMember(dest => dest.SenderUsername, opt => opt.MapFrom(src =>
-                src.Sender != null ? src.Sender.Username : "[deleted]"));
+                src.Sender != null ? src.Sender.Username : "[deleted]"))
+            .ForMember(dest => dest.SenderSigningKey, opt => opt.MapFrom(src =>
+                src.Sender != null ? src.Sender.SigningPublicKey : string.Empty));
 
         CreateMap<SendMessageDto, Data.Entities.Message>();
 

@@ -11,6 +11,36 @@
 using json = nlohmann::json;
 
 // ---------------------------------------------------------------------------
+// HKDF-SHA256 (RFC 5869) using libsodium's HMAC-SHA256 primitive.
+// hkdfExtract: PRK = HMAC-SHA256(salt, IKM)
+// hkdfExpand:  OKM = HMAC-SHA256(PRK, info || 0x01)  [single block, L ≤ 32]
+// ---------------------------------------------------------------------------
+static void hkdfExtract(unsigned char prk[crypto_auth_hmacsha256_BYTES],
+                         const unsigned char* salt, size_t saltLen,
+                         const unsigned char* ikm,  size_t ikmLen) {
+    crypto_auth_hmacsha256_state st;
+    crypto_auth_hmacsha256_init(&st, salt, saltLen);
+    crypto_auth_hmacsha256_update(&st, ikm, ikmLen);
+    crypto_auth_hmacsha256_final(&st, prk);
+}
+
+static void hkdfExpand(unsigned char* okm, size_t L,
+                        const unsigned char prk[crypto_auth_hmacsha256_BYTES],
+                        const unsigned char* info, size_t infoLen) {
+    if (L > crypto_auth_hmacsha256_BYTES)
+        throw std::runtime_error("hkdfExpand: L must be ≤ 32 for single-block expand");
+    const unsigned char counter = 0x01;
+    unsigned char T1[crypto_auth_hmacsha256_BYTES];
+    crypto_auth_hmacsha256_state st;
+    crypto_auth_hmacsha256_init(&st, prk, crypto_auth_hmacsha256_BYTES);
+    crypto_auth_hmacsha256_update(&st, info, infoLen);
+    crypto_auth_hmacsha256_update(&st, &counter, 1);
+    crypto_auth_hmacsha256_final(&st, T1);
+    std::memcpy(okm, T1, L);
+    sodium_memzero(T1, sizeof(T1));
+}
+
+// ---------------------------------------------------------------------------
 // RAII CURL handle
 // ---------------------------------------------------------------------------
 struct CurlHandle {
@@ -90,6 +120,10 @@ std::string Client::publicKeyB64() const {
     return b64Encode(_keys->publicKey().data(), crypto_box_PUBLICKEYBYTES);
 }
 
+std::string Client::signingPublicKeyB64() const {
+    return b64Encode(_keys->signingPublicKey().data(), crypto_sign_PUBLICKEYBYTES);
+}
+
 // ---------------------------------------------------------------------------
 // TOFU
 // ---------------------------------------------------------------------------
@@ -98,8 +132,9 @@ void Client::loadTofu() {
     if (!f) return;
     try {
         json j; f >> j;
-        for (auto& [k, v] : j.items())
-            _tofu[k] = v.get<std::string>();
+        for (auto& [user, keys] : j.items())
+            for (auto& [k, v] : keys.items())
+                _tofu[user][k] = v.get<std::string>();
     } catch (...) {}
 }
 
@@ -109,20 +144,29 @@ void Client::saveTofu() {
     f << j.dump(2);
 }
 
-bool Client::verifyOrPin(const std::string& user, const std::string& keyB64) {
+bool Client::verifyOrPin(const std::string& user,
+                          const std::string& encKeyB64,
+                          const std::string& signKeyB64) {
     auto it = _tofu.find(user);
     if (it == _tofu.end()) {
-        _tofu[user] = keyB64;
+        _tofu[user]["enc"]  = encKeyB64;
+        _tofu[user]["sign"] = signKeyB64;
         saveTofu();
-        std::cout << "[TOFU] Pinned public key for " << user << "\n";
+        std::cout << "[TOFU] Pinned keys for " << user << "\n";
         return true;
     }
-    if (it->second != keyB64) {
-        std::cerr << "[TOFU] WARNING: Public key for " << user
-                  << " has changed! Possible MITM. Aborting.\n";
-        return false;
+    bool ok = true;
+    if (it->second["enc"] != encKeyB64) {
+        std::cerr << "[TOFU] WARNING: Encryption key for " << user
+                  << " has changed! Possible MITM.\n";
+        ok = false;
     }
-    return true;
+    if (it->second["sign"] != signKeyB64) {
+        std::cerr << "[TOFU] WARNING: Signing key for " << user
+                  << " has changed! Possible MITM.\n";
+        ok = false;
+    }
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -176,38 +220,76 @@ std::string Client::httpPut(const std::string& p, const std::string& b)   { retu
 std::string Client::httpDelete(const std::string& p)                       { return request("DELETE", p, ""); }
 
 // ---------------------------------------------------------------------------
-// Crypto: encrypt plaintext for recipient using ephemeral X25519 + XSalsa20-Poly1305
-// Ephemeral sender key provides forward secrecy; recipient decrypts with their sk.
+// Crypto: authenticated encryption for a recipient
+//
+// Scheme:
+//   1. Ephemeral X25519 keypair (esk, epk) — provides forward secrecy
+//   2. X25519(esk, recipient_pk) → dh_out
+//   3. HKDF-Extract(salt=epk, ikm=dh_out) → PRK        [RFC 5869 §2.2]
+//   4. HKDF-Expand(PRK, "SecureMsg-v1-message-enc", 32) → enc_key  [§2.3]
+//   5. ChaCha20-Poly1305-IETF encrypt(enc_key, nonce, plaintext) → ciphertext
+//   6. Ed25519-Sign(sender_sk, ciphertext || nonce || epk) → signature
+//
+// The signature binds the sender's long-term identity to the ciphertext so
+// the recipient can verify message origin (criterion 2b).
 // ---------------------------------------------------------------------------
-std::string Client::encryptFor(const std::string& plaintext, const std::string& recipientPkB64) {
-    auto recipientPkBytes = b64Decode(recipientPkB64);
-    if (recipientPkBytes.size() != crypto_box_PUBLICKEYBYTES)
+std::string Client::encryptFor(const std::string& plaintext,
+                                const std::string& recipientPkB64) {
+    auto recipientPk = b64Decode(recipientPkB64);
+    if (recipientPk.size() != crypto_box_PUBLICKEYBYTES)
         throw std::runtime_error("Invalid recipient public key length");
 
-    // Generate ephemeral keypair
+    // 1. Ephemeral X25519 keypair
     unsigned char epk[crypto_box_PUBLICKEYBYTES];
     unsigned char esk[crypto_box_SECRETKEYBYTES];
     crypto_box_keypair(epk, esk);
 
-    // Random nonce
-    unsigned char nonce[crypto_box_NONCEBYTES];
+    // 2. Raw X25519 DH
+    unsigned char dh[crypto_scalarmult_BYTES];
+    if (crypto_scalarmult(dh, esk, recipientPk.data()) != 0)
+        throw std::runtime_error("X25519 DH failed (low-order point)");
+
+    // 3+4. HKDF-SHA256: PRK then enc_key
+    unsigned char prk[crypto_auth_hmacsha256_BYTES];
+    hkdfExtract(prk, epk, sizeof(epk), dh, sizeof(dh));
+    sodium_memzero(dh, sizeof(dh));
+
+    unsigned char enc_key[crypto_aead_chacha20poly1305_ietf_KEYBYTES];
+    static const char ENC_INFO[] = "SecureMsg-v1-message-enc";
+    hkdfExpand(enc_key, sizeof(enc_key), prk,
+               reinterpret_cast<const unsigned char*>(ENC_INFO), sizeof(ENC_INFO) - 1);
+    sodium_memzero(prk, sizeof(prk));
+
+    // 5. ChaCha20-Poly1305-IETF encrypt (12-byte nonce)
+    unsigned char nonce[crypto_aead_chacha20poly1305_ietf_NPUBBYTES];
     randombytes_buf(nonce, sizeof(nonce));
 
-    // Encrypt
-    std::vector<unsigned char> ct(crypto_box_MACBYTES + plaintext.size());
-    if (crypto_box_easy(ct.data(),
-                        reinterpret_cast<const unsigned char*>(plaintext.data()),
-                        plaintext.size(),
-                        nonce,
-                        recipientPkBytes.data(),
-                        esk) != 0)
-        throw std::runtime_error("Encryption failed");
+    std::vector<unsigned char> ct(plaintext.size() + crypto_aead_chacha20poly1305_ietf_ABYTES);
+    unsigned long long ct_len = 0;
+    crypto_aead_chacha20poly1305_ietf_encrypt(
+        ct.data(), &ct_len,
+        reinterpret_cast<const unsigned char*>(plaintext.data()), plaintext.size(),
+        nullptr, 0, nullptr, nonce, enc_key);
+    sodium_memzero(enc_key, sizeof(enc_key));
+    ct.resize(ct_len);
 
-    // Pack as JSON fields
+    // 6. Ed25519 sign: ciphertext || nonce || epk
+    std::vector<unsigned char> sigMaterial;
+    sigMaterial.insert(sigMaterial.end(), ct.begin(), ct.end());
+    sigMaterial.insert(sigMaterial.end(), nonce, nonce + sizeof(nonce));
+    sigMaterial.insert(sigMaterial.end(), epk,   epk   + sizeof(epk));
+
+    unsigned char sig[crypto_sign_BYTES];
+    if (crypto_sign_detached(sig, nullptr,
+                             sigMaterial.data(), sigMaterial.size(),
+                             _keys->signingSecretKey().data()) != 0)
+        throw std::runtime_error("Ed25519 signing failed");
+
     json j;
-    j["ciphertext"]       = b64Encode(ct.data(), ct.size());
-    j["nonce"]            = b64Encode(nonce, sizeof(nonce));
+    j["ciphertext"]         = b64Encode(ct.data(), ct.size());
+    j["nonce"]              = b64Encode(nonce, sizeof(nonce));
     j["ephemeralPublicKey"] = b64Encode(epk, sizeof(epk));
+    j["signature"]          = b64Encode(sig, sizeof(sig));
     return j.dump();
 }
 
@@ -215,16 +297,65 @@ std::string Client::decryptMessage(const Message& msg) const {
     auto ct   = b64Decode(msg.ciphertext);
     auto nonc = b64Decode(msg.nonce);
     auto epk  = b64Decode(msg.ephemeralPublicKey);
+    auto sig  = b64Decode(msg.signature);
 
-    if (epk.size()  != crypto_box_PUBLICKEYBYTES) throw std::runtime_error("Bad ephemeral key");
-    if (nonc.size() != crypto_box_NONCEBYTES)     throw std::runtime_error("Bad nonce");
-    if (ct.size()   <  crypto_box_MACBYTES)       throw std::runtime_error("Ciphertext too short");
+    if (epk.size()  != crypto_box_PUBLICKEYBYTES)
+        throw std::runtime_error("Bad ephemeral key length");
+    if (nonc.size() != crypto_aead_chacha20poly1305_ietf_NPUBBYTES)
+        throw std::runtime_error("Bad nonce length");
+    if (ct.size()   <  crypto_aead_chacha20poly1305_ietf_ABYTES)
+        throw std::runtime_error("Ciphertext too short");
+    if (sig.size()  != crypto_sign_BYTES)
+        throw std::runtime_error("Bad signature length");
 
-    std::vector<unsigned char> plain(ct.size() - crypto_box_MACBYTES);
-    if (crypto_box_open_easy(plain.data(), ct.data(), ct.size(),
-                             nonc.data(), epk.data(), _keys->secretKey().data()) != 0)
-        throw std::runtime_error("Decryption failed — not addressed to you or tampered");
+    // Verify Ed25519 signature before doing any decryption work
+    if (!msg.senderSigningKey.empty()) {
+        auto signPk = b64Decode(msg.senderSigningKey);
+        if (signPk.size() != crypto_sign_PUBLICKEYBYTES)
+            throw std::runtime_error("Bad sender signing key length");
 
+        std::vector<unsigned char> sigMaterial;
+        sigMaterial.insert(sigMaterial.end(), ct.begin(),   ct.end());
+        sigMaterial.insert(sigMaterial.end(), nonc.begin(), nonc.end());
+        sigMaterial.insert(sigMaterial.end(), epk.begin(),  epk.end());
+
+        if (crypto_sign_verify_detached(sig.data(),
+                                        sigMaterial.data(), sigMaterial.size(),
+                                        signPk.data()) != 0)
+            throw std::runtime_error(
+                "Signature verification FAILED for message from " +
+                msg.senderUsername + " — message may be forged");
+    }
+
+    // X25519 DH: recipient_sk × ephemeral_pk
+    unsigned char dh[crypto_scalarmult_BYTES];
+    if (crypto_scalarmult(dh, _keys->secretKey().data(), epk.data()) != 0)
+        throw std::runtime_error("X25519 DH failed");
+
+    // HKDF-SHA256 → enc_key
+    unsigned char prk[crypto_auth_hmacsha256_BYTES];
+    hkdfExtract(prk, epk.data(), epk.size(), dh, sizeof(dh));
+    sodium_memzero(dh, sizeof(dh));
+
+    unsigned char enc_key[crypto_aead_chacha20poly1305_ietf_KEYBYTES];
+    static const char ENC_INFO[] = "SecureMsg-v1-message-enc";
+    hkdfExpand(enc_key, sizeof(enc_key), prk,
+               reinterpret_cast<const unsigned char*>(ENC_INFO), sizeof(ENC_INFO) - 1);
+    sodium_memzero(prk, sizeof(prk));
+
+    // ChaCha20-Poly1305-IETF decrypt
+    std::vector<unsigned char> plain(ct.size() - crypto_aead_chacha20poly1305_ietf_ABYTES);
+    unsigned long long plain_len = 0;
+    if (crypto_aead_chacha20poly1305_ietf_decrypt(
+            plain.data(), &plain_len, nullptr,
+            ct.data(), ct.size(),
+            nullptr, 0,
+            nonc.data(), enc_key) != 0) {
+        sodium_memzero(enc_key, sizeof(enc_key));
+        throw std::runtime_error("ChaCha20-Poly1305 authentication/decryption failed");
+    }
+    sodium_memzero(enc_key, sizeof(enc_key));
+    plain.resize(plain_len);
     return std::string(plain.begin(), plain.end());
 }
 
@@ -233,9 +364,10 @@ std::string Client::decryptMessage(const Message& msg) const {
 // ---------------------------------------------------------------------------
 bool Client::signUp(const std::string& username, const std::string& password) {
     json body;
-    body["username"]  = username;
-    body["password"]  = password;
-    body["publicKey"] = publicKeyB64();
+    body["username"]         = username;
+    body["password"]         = password;
+    body["publicKey"]        = publicKeyB64();
+    body["signingPublicKey"] = signingPublicKeyB64();
 
     try {
         httpPost("/api/auth/sign-up", body.dump());
@@ -289,7 +421,12 @@ std::optional<User> Client::getUser(const std::string& username) {
     try {
         auto resp = httpGet("/api/user/" + username);
         auto j = json::parse(resp);
-        return User{ j["id"], j["username"], j["publicKey"] };
+        return User{
+            j["id"].get<std::string>(),
+            j["username"].get<std::string>(),
+            j["publicKey"].get<std::string>(),
+            j["signingPublicKey"].get<std::string>()
+        };
     } catch (...) { return std::nullopt; }
 }
 
@@ -341,12 +478,14 @@ std::optional<Conversation> Client::createConversation(const std::string& recipi
 // ---------------------------------------------------------------------------
 static Message parseMessage(const json& j) {
     Message m;
-    m.id                 = j.at("id");
-    m.conversationId     = j.at("conversationId");
+    m.id                 = j.at("id").get<std::string>();
+    m.conversationId     = j.at("conversationId").get<std::string>();
     m.senderUsername     = j.value("senderUsername", "[deleted]");
-    m.ciphertext         = j.at("ciphertext");
-    m.nonce              = j.at("nonce");
-    m.ephemeralPublicKey = j.at("ephemeralPublicKey");
+    m.senderSigningKey   = j.value("senderSigningKey", "");
+    m.ciphertext         = j.at("ciphertext").get<std::string>();
+    m.nonce              = j.at("nonce").get<std::string>();
+    m.ephemeralPublicKey = j.at("ephemeralPublicKey").get<std::string>();
+    m.signature          = j.value("signature", "");
     m.timestamp          = j.value("timestamp", "");
     return m;
 }
@@ -369,10 +508,11 @@ bool Client::sendMessage(const std::string& conversationId,
     try {
         auto encrypted = json::parse(encryptFor(plaintext, recipientPublicKeyB64));
         json body;
-        body["conversationId"]   = conversationId;
-        body["ciphertext"]       = encrypted["ciphertext"];
-        body["nonce"]            = encrypted["nonce"];
+        body["conversationId"]    = conversationId;
+        body["ciphertext"]        = encrypted["ciphertext"];
+        body["nonce"]             = encrypted["nonce"];
         body["ephemeralPublicKey"] = encrypted["ephemeralPublicKey"];
+        body["signature"]         = encrypted["signature"];
         httpPost("/api/message", body.dump());
         return true;
     } catch (const std::exception& e) {
@@ -383,13 +523,13 @@ bool Client::sendMessage(const std::string& conversationId,
 
 bool Client::forwardMessage(const Message& msg, const std::string& targetConversationId,
                              const std::string& recipientUsername) {
-    // TOFU: verify recipient's public key before encrypting for them
+    // TOFU: verify both keys for recipient before encrypting
     auto user = getUser(recipientUsername);
     if (!user) {
         std::cerr << "User not found: " << recipientUsername << "\n";
         return false;
     }
-    if (!verifyOrPin(recipientUsername, user->publicKey))
+    if (!verifyOrPin(recipientUsername, user->publicKey, user->signingPublicKey))
         return false; // TOFU mismatch — abort
 
     // Decrypt original, re-encrypt for recipient

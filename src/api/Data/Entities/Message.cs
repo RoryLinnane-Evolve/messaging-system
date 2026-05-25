@@ -18,6 +18,9 @@ public class Message
     [Required]
     public required string EphemeralPublicKey { get; set; }
 
+    [Required]
+    public required string Signature { get; set; }
+
     public DateTime Timestamp { get; set; } = DateTime.UtcNow;
 
     // Navigation properties

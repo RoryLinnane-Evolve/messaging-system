@@ -11,6 +11,7 @@ public sealed class RegisterDto
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
     public string PublicKey { get; set; } = string.Empty;
+    public string SigningPublicKey { get; set; } = string.Empty;
 }
 
 public sealed class LogInDto

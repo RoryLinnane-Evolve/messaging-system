@@ -38,7 +38,8 @@ public class AuthService : IAuthService
             Username = dto.Username,
             PasswordHash = Convert.ToBase64String(hash),
             Salt = Convert.ToBase64String(salt),
-            PublicKey = dto.PublicKey
+            PublicKey = dto.PublicKey,
+            SigningPublicKey = dto.SigningPublicKey
         };
 
         _db.Users.Add(user);

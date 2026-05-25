@@ -19,6 +19,9 @@ public class User
     [Required]
     public required string PublicKey { get; set; }
 
+    [Required]
+    public required string SigningPublicKey { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation properties

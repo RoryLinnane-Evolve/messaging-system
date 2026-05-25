@@ -151,6 +151,15 @@ static void menuLiveChat(Client& client) {
     auto recipientUser = client.getUser(recipientUsername);
     if (!recipientUser) { std::cout << "Could not fetch recipient info.\n"; return; }
 
+    // TOFU: pin/verify both keys for the recipient
+    if (!client.verifyOrPin(recipientUsername,
+                            recipientUser->publicKey,
+                            recipientUser->signingPublicKey)) {
+        std::cout << "TOFU key mismatch for " << recipientUsername
+                  << " — aborting for your safety.\n";
+        return;
+    }
+
     // Connect WebSocket for real-time delivery
     if (!client.wsConnected()) {
         client.connectWebSocket();
@@ -188,9 +197,11 @@ static void menuLiveChat(Client& client) {
                     m.id                 = data.at("id").get<std::string>();
                     m.conversationId     = data.at("conversationId").get<std::string>();
                     m.senderUsername     = data.value("senderUsername", "[deleted]");
+                    m.senderSigningKey   = data.value("senderSigningKey", "");
                     m.ciphertext         = data.at("ciphertext").get<std::string>();
                     m.nonce              = data.at("nonce").get<std::string>();
                     m.ephemeralPublicKey = data.at("ephemeralPublicKey").get<std::string>();
+                    m.signature          = data.value("signature", "");
                     m.timestamp          = data.value("timestamp", "");
                     if (m.conversationId == conv.id && m.senderUsername != client.username()) {
                         std::string text;
