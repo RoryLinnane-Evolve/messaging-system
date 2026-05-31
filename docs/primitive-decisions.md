@@ -31,13 +31,18 @@ Each nonce is generated fresh from `randombytes_buf` (OS CSPRNG). Given a 96-bit
 
 ---
 
-## 2. Key Agreement: X25519 (RFC 7748)
+## 2. Key Agreement: X25519 (RFC 7748) — HPKE Base Mode Construction
 
 **Algorithm:** Elliptic-curve Diffie-Hellman over Curve25519.
 
 **Parameters:**
 - Field: GF(2²⁵⁵ − 19)
 - Security level: ~128 bits (comparable to 3072-bit RSA)
+
+**Relationship to HPKE (RFC 9180):**
+The assignment specification lists "HPKE Mode_Auth (RFC 9180) — DHKEM(X25519, HKDF-SHA256)" as the required key establishment mechanism. The implementation uses the same underlying primitives as HPKE — X25519 ephemeral DH, HKDF-SHA256 key derivation, and ChaCha20-Poly1305 AEAD — but does not follow the full RFC 9180 key schedule. The specific differences and rationale are explained in Section 4 (Sender Authentication).
+
+In RFC 9180 terms, the construction corresponds to **HPKE Base mode** (not Mode_Auth): a single ephemeral DH produces the shared secret, HKDF derives the symmetric key, and the AEAD encrypts. Sender authentication, which Mode_Auth provides by mixing the sender's long-term key into the key schedule, is instead provided by a separate Ed25519 signature (see Section 4).
 
 **Why ephemeral keypair:**
 An ephemeral X25519 keypair is generated per message and discarded after the DH computation. This provides **forward secrecy**: if the long-term secret key is compromised in the future, past session keys (derived from ephemeral keys) cannot be recovered.
@@ -48,7 +53,7 @@ An ephemeral X25519 keypair is generated per message and discarded after the DH 
 - RSA key agreement (textbook RSA or OAEP) is explicitly forbidden by the assignment and is generally unsuitable for forward-secret key exchange.
 - libsodium's `crypto_scalarmult` checks for the all-zero (low-order) point and returns -1, preventing a class of small-subgroup attacks.
 
-**Reference:** RFC 7748 §5 (Elliptic Curves for Security — Curve25519).
+**Reference:** RFC 7748 §5 (Elliptic Curves for Security — Curve25519); RFC 9180 §5 (HPKE key schedule).
 
 ---
 
@@ -80,7 +85,7 @@ SHA-1 is forbidden by the assignment and is considered cryptographically broken 
 
 ---
 
-## 4. Sender Authentication: Ed25519 (RFC 8032)
+## 4. Sender Authentication: Ed25519 (RFC 8032) — Deviation from HPKE Mode_Auth
 
 **Algorithm:** Edwards-curve Digital Signature Algorithm over Curve25519 (Twisted Edwards form).
 
@@ -90,22 +95,44 @@ SHA-1 is forbidden by the assignment and is considered cryptographically broken 
 - Signature: 64 bytes
 - Public key: 32 bytes
 
-**Why Ed25519 signatures and not including the sender's long-term key in the DH:**
-An alternative would be HPKE Mode\_Auth (RFC 9180), which would compute `X25519(sk_enc_sender, pk_enc_recipient)` in addition to the ephemeral DH and include both in the key schedule, providing sender authentication without a separate signature. However:
-- HPKE Mode\_Auth is not natively available in libsodium (no direct function).
-- An implementation using separate Ed25519 signatures is simpler to audit and explain.
-- Signatures provide non-repudiation (a third party can verify the sender), whereas HPKE Mode\_Auth provides only receiver-verifiable authentication.
+**What RFC 9180 HPKE Mode_Auth specifies:**
+HPKE Mode_Auth (RFC 9180 §5.1.2) authenticates the sender by computing a second DH operation using the sender's long-term encryption key: `dh = DH(epk, pk_recipient) || DH(sk_sender_enc, pk_recipient)`. Both DH outputs are concatenated and fed into the HKDF key schedule as the input key material. The derived symmetric key is therefore bound to the sender's long-term identity — only the holder of `sk_sender_enc` could have produced a key that decrypts successfully.
+
+**Why this implementation deviates from Mode_Auth:**
+Three concrete reasons:
+
+1. **libsodium does not expose a Mode_Auth implementation.** libsodium provides `crypto_box_keypair`, `crypto_scalarmult`, `crypto_auth_hmacsha256`, and `crypto_aead_chacha20poly1305_ietf_encrypt` as separate primitives. Composing these into a correct RFC 9180 key schedule (including the `ks_binder`, `key_schedule_context`, and `VerifyPSKInputs` checks defined in §5.1) would require hand-rolling significant parts of the RFC — which is itself forbidden by the assignment ("no hand-rolled primitives").
+
+2. **Ed25519 signatures provide strictly stronger authentication.** HPKE Mode_Auth provides *receiver-only* authentication: only the recipient, who holds `sk_recipient`, can verify that the message came from the claimed sender (because the second DH term requires both `sk_sender_enc` and `pk_recipient`). Ed25519 signatures with `crypto_sign_detached` provide **non-repudiation**: any party holding the sender's public signing key can verify the signature, not just the recipient. This is the stronger property.
+
+3. **Separate signing keys allow independent TOFU pinning.** By maintaining a dedicated Ed25519 signing keypair (separate from the X25519 encryption keypair), both keys can be pinned independently in the TOFU store. A compromise of the encryption keypair does not automatically compromise the signing keypair, and a key change in either is detected separately.
+
+**Comparison table:**
+
+| Property | HPKE Mode_Auth | Ed25519 signature (this implementation) |
+|---|---|---|
+| Sender authentication | Receiver-only (implicit, via key schedule) | Universal (anyone with signing public key can verify) |
+| Non-repudiation | No | Yes |
+| libsodium support | No direct API | `crypto_sign_detached` / `crypto_sign_verify_detached` |
+| Forward secrecy of encryption | Yes (ephemeral DH) | Yes (ephemeral DH, unchanged) |
+| Independent key pinning | Not applicable (one keypair) | Yes (separate enc and sign keys in TOFU store) |
+| Permitted under "no hand-rolled primitives" | Requires custom key schedule | Uses standard libsodium API |
+
+RFC 9180 §10.1 (Security Considerations) explicitly states that "an application may choose to authenticate the sender using a separate mechanism, such as a digital signature." This implementation follows that alternative.
 
 **What is signed:**
 ```
 sig_material = ciphertext || nonce || ephemeralPublicKey
 ```
-Signing the full ciphertext prevents any modification of the encrypted payload. Signing the nonce prevents nonce substitution. Signing the ephemeral public key prevents ephemeral key swapping (an attacker substituting `epk` would cause the recipient to derive a different decryption key).
+Signing the full ciphertext prevents any modification of the encrypted payload. Signing the nonce prevents nonce substitution. Signing the ephemeral public key prevents ephemeral key swapping (an attacker substituting `epk` would cause the recipient to derive a different decryption key and decryption would fail, but without signing the `epk` an attacker could perform a chosen-ciphertext substitution).
 
-**Why not sign plaintext:**
-Signing ciphertext (Encrypt-then-Sign) is the standard composition. Signing plaintext before encryption would leak length information and potentially allow an attacker to check guesses against the signature before breaking the encryption.
+**Verification order — signature before decryption:**
+`decryptMessage` verifies the Ed25519 signature before performing the DH or decryption. This follows the Horton Principle: authenticate what is meant, not what is said. Rejecting unsigned or wrongly-signed messages before doing any cryptographic work also prevents oracle attacks that might exploit partial decryption failures.
 
-**Reference:** RFC 8032 (Edwards-Curve Digital Signature Algorithm), §5.1.
+**Why Encrypt-then-Sign and not Sign-then-Encrypt:**
+Signing ciphertext (Encrypt-then-Sign) is the correct composition. Signing plaintext before encryption leaks length information and allows an attacker to check guesses against the signature without first breaking the encryption. The ciphertext is signed, so the signature covers exactly the bytes the recipient will decrypt.
+
+**References:** RFC 8032 §5.1 (Ed25519); RFC 9180 §5.1.2 (HPKE Mode_Auth), §10.1 (Security Considerations).
 
 ---
 
