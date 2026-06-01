@@ -45,6 +45,7 @@ public:
     // ── Crypto ────────────────────────────────────────────────────────────────
     [[nodiscard]] std::string decryptMessage(const Message& msg) const;
     [[nodiscard]] std::string publicKeyB64() const;
+    [[nodiscard]] std::string signingPublicKeyB64() const;
 
     // ── WebSocket ─────────────────────────────────────────────────────────────
     // Connect the real-time channel after login.
@@ -69,9 +70,13 @@ private:
     std::unique_ptr<MessageStore>    _store;
     WebSocketClient                  _ws;
 
-    // TOFU: username → pinned base64 public key
+    // TOFU: username → pinned base64 encryption public key
     std::map<std::string, std::string> _tofu;
     std::string                        _tofuPath;
+
+    // Sign-TOFU: username → pinned base64 Ed25519 signing public key
+    std::map<std::string, std::string> _signTofu;
+    std::string                        _signTofuPath;
 
     // ── HTTP ──────────────────────────────────────────────────────────────────
     [[nodiscard]] std::string httpGet(const std::string& path);
@@ -88,6 +93,9 @@ private:
 
     // ── TOFU ──────────────────────────────────────────────────────────────────
     [[nodiscard]] bool verifyOrPin(const std::string& user, const std::string& keyB64);
+    [[nodiscard]] bool verifyOrPinSignKey(const std::string& user, const std::string& keyB64);
     void loadTofu();
     void saveTofu();
+    void loadSignTofu();
+    void saveSignTofu();
 };

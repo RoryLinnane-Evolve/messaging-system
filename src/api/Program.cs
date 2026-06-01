@@ -1,4 +1,5 @@
 using System.Text;
+using System.Threading.RateLimiting;
 using api.Config;
 using api.Data;
 using api.Features.Auth;
@@ -9,6 +10,7 @@ using api.Features.RealTimeMessage;
 using api.Features.User;
 using api.Profiles;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 
@@ -55,6 +57,26 @@ builder.Services.AddAutoMapper(cfg => cfg.AddProfile<MappingProfile>());
 
 builder.Services.AddControllers();
 
+// Rate limiting — sliding window: 10 requests per minute per IP on auth endpoints.
+// Defends against brute-force login and automated account creation.
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddSlidingWindowLimiter("auth", limiterOptions =>
+    {
+        limiterOptions.Window            = TimeSpan.FromMinutes(1);
+        limiterOptions.SegmentsPerWindow = 6;   // 10-second buckets
+        limiterOptions.PermitLimit       = 10;
+        limiterOptions.QueueLimit        = 0;   // reject immediately, no queuing
+        limiterOptions.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+    });
+
+    options.OnRejected = async (context, _) =>
+    {
+        context.HttpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+        await context.HttpContext.Response.WriteAsync("Too many requests. Please try again later.");
+    };
+});
+
 var app = builder.Build();
 
 // Apply any pending migrations on startup
@@ -65,6 +87,7 @@ using (var scope = app.Services.CreateScope())
 }
 
 app.UseHttpsRedirection();
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseRealTimeMessages();

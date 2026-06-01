@@ -24,7 +24,7 @@ Both clients use **libsodium `crypto_box_easy`** (X25519 key exchange + XSalsa20
 - Each user generates an X25519 keypair on registration. The public key is stored on the server; the private key never leaves the client.
 - Each message uses a fresh ephemeral sender keypair, providing forward secrecy.
 - Nonces are 24 bytes generated from a CSPRNG, never reused.
-- Private keys are stored encrypted at rest using PBKDF2 (200,000 iterations, SHA-256) + AES-256-GCM.
+- Private keys are stored encrypted at rest using Argon2id (`OPSLIMIT_INTERACTIVE`, `MEMLIMIT_INTERACTIVE`) to derive a wrapping key from the user's passphrase, then encrypted with XSalsa20-Poly1305 AEAD via libsodium `crypto_secretbox_easy`.
 
 ### Trust model
 

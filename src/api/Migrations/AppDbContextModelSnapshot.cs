@@ -115,6 +115,9 @@ namespace api.Migrations
                     b.Property<Guid?>("SenderId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("Signature")
+                        .HasColumnType("text");
+
                     b.Property<DateTime>("Timestamp")
                         .HasColumnType("timestamp with time zone");
 
@@ -145,6 +148,10 @@ namespace api.Migrations
                         .HasColumnType("text");
 
                     b.Property<string>("Salt")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("SigningPublicKey")
                         .IsRequired()
                         .HasColumnType("text");
 

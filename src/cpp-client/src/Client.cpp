@@ -81,13 +81,19 @@ Client::Client(std::string baseUrl)
 
     const char* home = std::getenv("HOME");
     std::string homeDir = home ? home : ".";
-    _tofuPath = homeDir + "/.securemsg_tofu.json";
+    _tofuPath     = homeDir + "/.securemsg_tofu.json";
+    _signTofuPath = homeDir + "/.securemsg_sign_tofu.json";
     _keys = std::make_unique<KeyStore>(KeyStore::load(homeDir + "/.securemsg_keys.bin"));
     loadTofu();
+    loadSignTofu();
 }
 
 std::string Client::publicKeyB64() const {
     return b64Encode(_keys->publicKey().data(), crypto_box_PUBLICKEYBYTES);
+}
+
+std::string Client::signingPublicKeyB64() const {
+    return b64Encode(_keys->signingPublicKey().data(), crypto_sign_PUBLICKEYBYTES);
 }
 
 // ---------------------------------------------------------------------------
@@ -114,11 +120,43 @@ bool Client::verifyOrPin(const std::string& user, const std::string& keyB64) {
     if (it == _tofu.end()) {
         _tofu[user] = keyB64;
         saveTofu();
-        std::cout << "[TOFU] Pinned public key for " << user << "\n";
+        std::cout << "[TOFU] Pinned encryption key for " << user << "\n";
         return true;
     }
     if (it->second != keyB64) {
-        std::cerr << "[TOFU] WARNING: Public key for " << user
+        std::cerr << "[TOFU] WARNING: Encryption key for " << user
+                  << " has changed! Possible MITM. Aborting.\n";
+        return false;
+    }
+    return true;
+}
+
+void Client::loadSignTofu() {
+    std::ifstream f(_signTofuPath);
+    if (!f) return;
+    try {
+        json j; f >> j;
+        for (auto& [k, v] : j.items())
+            _signTofu[k] = v.get<std::string>();
+    } catch (...) {}
+}
+
+void Client::saveSignTofu() {
+    json j = _signTofu;
+    std::ofstream f(_signTofuPath);
+    f << j.dump(2);
+}
+
+bool Client::verifyOrPinSignKey(const std::string& user, const std::string& keyB64) {
+    auto it = _signTofu.find(user);
+    if (it == _signTofu.end()) {
+        _signTofu[user] = keyB64;
+        saveSignTofu();
+        std::cout << "[TOFU] Pinned signing key for " << user << "\n";
+        return true;
+    }
+    if (it->second != keyB64) {
+        std::cerr << "[TOFU] WARNING: Signing key for " << user
                   << " has changed! Possible MITM. Aborting.\n";
         return false;
     }
@@ -203,11 +241,23 @@ std::string Client::encryptFor(const std::string& plaintext, const std::string& 
                         esk) != 0)
         throw std::runtime_error("Encryption failed");
 
-    // Pack as JSON fields
+    // Sign (ciphertext_bytes || nonce_bytes || ephemeralPK_bytes) with our Ed25519 signing key.
+    // Signing raw bytes (not base64 strings) avoids encoding ambiguity.
+    std::vector<unsigned char> signInput;
+    signInput.insert(signInput.end(), ct.begin(), ct.end());
+    signInput.insert(signInput.end(), nonce, nonce + sizeof(nonce));
+    signInput.insert(signInput.end(), epk, epk + sizeof(epk));
+
+    unsigned char sig[crypto_sign_BYTES];
+    crypto_sign_detached(sig, nullptr,
+                         signInput.data(), signInput.size(),
+                         _keys->signingSecretKey().data());
+
     json j;
-    j["ciphertext"]       = b64Encode(ct.data(), ct.size());
-    j["nonce"]            = b64Encode(nonce, sizeof(nonce));
+    j["ciphertext"]        = b64Encode(ct.data(), ct.size());
+    j["nonce"]             = b64Encode(nonce, sizeof(nonce));
     j["ephemeralPublicKey"] = b64Encode(epk, sizeof(epk));
+    j["signature"]         = b64Encode(sig, sizeof(sig));
     return j.dump();
 }
 
@@ -219,6 +269,36 @@ std::string Client::decryptMessage(const Message& msg) const {
     if (epk.size()  != crypto_box_PUBLICKEYBYTES) throw std::runtime_error("Bad ephemeral key");
     if (nonc.size() != crypto_box_NONCEBYTES)     throw std::runtime_error("Bad nonce");
     if (ct.size()   <  crypto_box_MACBYTES)       throw std::runtime_error("Ciphertext too short");
+
+    // Verify Ed25519 signature before decrypting.
+    // We verify over the same raw-bytes input used when signing.
+    if (!msg.signature.empty()) {
+        auto it = _signTofu.find(msg.senderUsername);
+        if (it != _signTofu.end()) {
+            auto sigBytes   = b64Decode(msg.signature);
+            auto sigPkBytes = b64Decode(it->second);
+
+            if (sigPkBytes.size() != crypto_sign_PUBLICKEYBYTES)
+                throw std::runtime_error("Pinned signing key for " + msg.senderUsername + " has wrong length");
+
+            std::vector<unsigned char> signInput;
+            signInput.insert(signInput.end(), ct.begin(), ct.end());
+            signInput.insert(signInput.end(), nonc.begin(), nonc.end());
+            signInput.insert(signInput.end(), epk.begin(), epk.end());
+
+            if (sigBytes.size() != crypto_sign_BYTES)
+                throw std::runtime_error("Invalid signature length in message from " + msg.senderUsername);
+
+            if (crypto_sign_verify_detached(sigBytes.data(),
+                                            signInput.data(), signInput.size(),
+                                            sigPkBytes.data()) != 0)
+                throw std::runtime_error("Sender authentication FAILED for " + msg.senderUsername +
+                                         " — message may have been forged or tampered");
+        } else {
+            std::cerr << "[AUTH] Signature present from " << msg.senderUsername
+                      << " but signing key not yet pinned. Fetch their profile to enable verification.\n";
+        }
+    }
 
     std::vector<unsigned char> plain(ct.size() - crypto_box_MACBYTES);
     if (crypto_box_open_easy(plain.data(), ct.data(), ct.size(),
@@ -233,9 +313,10 @@ std::string Client::decryptMessage(const Message& msg) const {
 // ---------------------------------------------------------------------------
 bool Client::signUp(const std::string& username, const std::string& password) {
     json body;
-    body["username"]  = username;
-    body["password"]  = password;
-    body["publicKey"] = publicKeyB64();
+    body["username"]        = username;
+    body["password"]        = password;
+    body["publicKey"]       = publicKeyB64();
+    body["signingPublicKey"] = signingPublicKeyB64();
 
     try {
         httpPost("/api/auth/sign-up", body.dump());
@@ -289,7 +370,12 @@ std::optional<User> Client::getUser(const std::string& username) {
     try {
         auto resp = httpGet("/api/user/" + username);
         auto j = json::parse(resp);
-        return User{ j["id"], j["username"], j["publicKey"] };
+        User user{ j["id"], j["username"], j["publicKey"],
+                   j.value("signingPublicKey", "") };
+        // TOFU-pin the signing key so decryptMessage can verify their messages
+        if (!user.signingPublicKey.empty())
+            verifyOrPinSignKey(username, user.signingPublicKey);
+        return user;
     } catch (...) { return std::nullopt; }
 }
 
@@ -347,6 +433,7 @@ static Message parseMessage(const json& j) {
     m.ciphertext         = j.at("ciphertext");
     m.nonce              = j.at("nonce");
     m.ephemeralPublicKey = j.at("ephemeralPublicKey");
+    m.signature          = j.value("signature", "");
     m.timestamp          = j.value("timestamp", "");
     return m;
 }
@@ -369,10 +456,11 @@ bool Client::sendMessage(const std::string& conversationId,
     try {
         auto encrypted = json::parse(encryptFor(plaintext, recipientPublicKeyB64));
         json body;
-        body["conversationId"]   = conversationId;
-        body["ciphertext"]       = encrypted["ciphertext"];
-        body["nonce"]            = encrypted["nonce"];
+        body["conversationId"]    = conversationId;
+        body["ciphertext"]        = encrypted["ciphertext"];
+        body["nonce"]             = encrypted["nonce"];
         body["ephemeralPublicKey"] = encrypted["ephemeralPublicKey"];
+        body["signature"]         = encrypted["signature"];
         httpPost("/api/message", body.dump());
         return true;
     } catch (const std::exception& e) {

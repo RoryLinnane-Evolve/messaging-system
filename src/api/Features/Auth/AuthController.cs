@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace api.Features.Auth;
 
@@ -14,6 +15,7 @@ public class AuthController : ControllerBase
         _authService = authService;
     }
 
+    [EnableRateLimiting("auth")]
     [HttpPost("sign-up")]
     public async Task<ActionResult<RegistrationResult>> SignUp(RegisterDto dto)
     {
@@ -21,6 +23,7 @@ public class AuthController : ControllerBase
         return Ok(result);
     }
 
+    [EnableRateLimiting("auth")]
     [HttpPost("login")]
     public async Task<ActionResult<LogInResult>> LogIn(LogInDto dto)
     {
