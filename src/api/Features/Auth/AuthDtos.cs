@@ -24,6 +24,9 @@ public sealed class RegisterDto
 
     [Required]
     public string SigningPublicKey { get; set; } = string.Empty;
+
+    // Optional — only provided by the web client (C++ client does not send this)
+    public string? EncryptedKeyBlob { get; set; }
 }
 
 public sealed class LogInDto

@@ -373,8 +373,8 @@ std::optional<User> Client::getUser(const std::string& username) {
         User user{ j["id"], j["username"], j["publicKey"],
                    j.value("signingPublicKey", "") };
         // TOFU-pin the signing key so decryptMessage can verify their messages
-        if (!user.signingPublicKey.empty())
-            verifyOrPinSignKey(username, user.signingPublicKey);
+        if (!user.signingPublicKey.empty() && !verifyOrPinSignKey(username, user.signingPublicKey))
+            return std::nullopt;
         return user;
     } catch (...) { return std::nullopt; }
 }
@@ -433,7 +433,7 @@ static Message parseMessage(const json& j) {
     m.ciphertext         = j.at("ciphertext");
     m.nonce              = j.at("nonce");
     m.ephemeralPublicKey = j.at("ephemeralPublicKey");
-    m.signature          = j.value("signature", "");
+    m.signature          = (!j.contains("signature") || j["signature"].is_null()) ? "" : j["signature"].get<std::string>();
     m.timestamp          = j.value("timestamp", "");
     return m;
 }

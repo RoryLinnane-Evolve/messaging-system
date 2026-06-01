@@ -19,3 +19,18 @@ public class ChangePasswordDto
     [MinLength(8)]
     public string NewPassword { get; set; } = string.Empty;
 }
+
+public class KeyBlobDto
+{
+    public string? EncryptedKeyBlob { get; set; }
+}
+
+public class UpdateKeyBlobDto
+{
+    [Required]
+    public string EncryptedKeyBlob { get; set; } = string.Empty;
+
+    // When updating the blob (e.g. passphrase change), the public keys may also change
+    public string? PublicKey { get; set; }
+    public string? SigningPublicKey { get; set; }
+}

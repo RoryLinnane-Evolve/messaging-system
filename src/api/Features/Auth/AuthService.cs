@@ -35,11 +35,12 @@ public class AuthService : IAuthService
 
         var user = new Data.Entities.User
         {
-            Username = dto.Username,
-            PasswordHash = Convert.ToBase64String(hash),
-            Salt = Convert.ToBase64String(salt),
-            PublicKey = dto.PublicKey,
-            SigningPublicKey = dto.SigningPublicKey
+            Username         = dto.Username,
+            PasswordHash     = Convert.ToBase64String(hash),
+            Salt             = Convert.ToBase64String(salt),
+            PublicKey        = dto.PublicKey,
+            SigningPublicKey  = dto.SigningPublicKey,
+            EncryptedKeyBlob = dto.EncryptedKeyBlob,
         };
 
         _db.Users.Add(user);
@@ -84,7 +85,7 @@ public class AuthService : IAuthService
 
     private string GenerateToken(Data.Entities.User user)
     {
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config.JwtSecret));
+        var key   = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config.JwtSecret));
         var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
         var token = new JwtSecurityToken(

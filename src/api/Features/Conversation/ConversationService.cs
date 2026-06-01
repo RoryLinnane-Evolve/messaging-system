@@ -10,6 +10,7 @@ public interface IConversationService
     Task<IEnumerable<ConversationItemDto>> GetConversations(Guid userId);
     Task<ConversationDto?> GetConversation(Guid conversationId, Guid userId);
     Task<ConversationDto> CreateConversation(Guid userId, CreateConversationDto dto);
+    Task<IEnumerable<ConversationDigestDto>?> GetDigests(Guid conversationId, Guid userId);
 }
 
 public sealed class ConversationService : IConversationService
@@ -88,5 +89,29 @@ public sealed class ConversationService : IConversationService
             .FirstAsync(c => c.Id == conversation.Id);
 
         return _mapper.Map<ConversationDto>(created);
+    }
+
+    public async Task<IEnumerable<ConversationDigestDto>?> GetDigests(Guid conversationId, Guid userId)
+    {
+        var isParticipant = await _db.ConversationParticipants
+            .AnyAsync(p => p.ConversationId == conversationId && p.UserId == userId);
+
+        if (!isParticipant) return null;
+
+        var digests = await _db.ConversationDigests
+            .Where(d => d.ConversationId == conversationId)
+            .OrderBy(d => d.RecordedAt)
+            .ToListAsync();
+
+        return digests.Select(d => new ConversationDigestDto
+        {
+            Id              = d.Id,
+            ConversationId  = d.ConversationId,
+            FirstMessageId  = d.FirstMessageId,
+            LastMessageId   = d.LastMessageId,
+            Hash            = d.Hash,
+            TransactionHash = d.TransactionHash,
+            RecordedAt      = d.RecordedAt,
+        });
     }
 }

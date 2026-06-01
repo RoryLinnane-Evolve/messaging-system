@@ -22,6 +22,10 @@ public class User
     [Required]
     public required string SigningPublicKey { get; set; }
 
+    // Argon2id-encrypted keypair blob — stored server-side for cross-device access.
+    // Server never sees the plaintext private key; only the passphrase-encrypted blob.
+    public string? EncryptedKeyBlob { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation properties

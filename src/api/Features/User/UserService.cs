@@ -13,6 +13,8 @@ public interface IUserService
     Task<UserDto?> GetUser(string username);
     Task<bool> ChangePassword(Guid userId, ChangePasswordDto dto);
     Task DeleteUser(Guid userId);
+    Task<KeyBlobDto?> GetKeyBlob(Guid userId);
+    Task<bool> UpdateKeyBlob(Guid userId, UpdateKeyBlobDto dto);
 }
 
 public class UserService : IUserService
@@ -41,13 +43,13 @@ public class UserService : IUserService
             return false;
 
         var currentHash = HashPassword(dto.CurrentPassword, Convert.FromBase64String(user.Salt));
-        var storedHash = Convert.FromBase64String(user.PasswordHash);
+        var storedHash  = Convert.FromBase64String(user.PasswordHash);
 
         if (!CryptographicOperations.FixedTimeEquals(currentHash, storedHash))
             return false;
 
-        var newSalt = RandomNumberGenerator.GetBytes(16);
-        user.Salt = Convert.ToBase64String(newSalt);
+        var newSalt      = RandomNumberGenerator.GetBytes(16);
+        user.Salt        = Convert.ToBase64String(newSalt);
         user.PasswordHash = Convert.ToBase64String(HashPassword(dto.NewPassword, newSalt));
 
         await _db.SaveChangesAsync();
@@ -60,20 +62,39 @@ public class UserService : IUserService
         if (user == null)
             return;
 
-        // SenderId is nullable with SetNull — EF will null it out on delete
         _db.Users.Remove(user);
         await _db.SaveChangesAsync();
+    }
+
+    public async Task<KeyBlobDto?> GetKeyBlob(Guid userId)
+    {
+        var user = await _db.Users.FindAsync(userId);
+        if (user == null) return null;
+        return new KeyBlobDto { EncryptedKeyBlob = user.EncryptedKeyBlob };
+    }
+
+    public async Task<bool> UpdateKeyBlob(Guid userId, UpdateKeyBlobDto dto)
+    {
+        var user = await _db.Users.FindAsync(userId);
+        if (user == null) return false;
+
+        user.EncryptedKeyBlob = dto.EncryptedKeyBlob;
+        if (dto.PublicKey != null)        user.PublicKey        = dto.PublicKey;
+        if (dto.SigningPublicKey != null)  user.SigningPublicKey  = dto.SigningPublicKey;
+
+        await _db.SaveChangesAsync();
+        return true;
     }
 
     private byte[] HashPassword(string password, byte[] salt)
     {
         var argon2 = new Argon2id(Encoding.UTF8.GetBytes(password))
         {
-            Salt = salt,
-            KnownSecret = Encoding.UTF8.GetBytes(_config.ArgonPepper),
+            Salt               = salt,
+            KnownSecret        = Encoding.UTF8.GetBytes(_config.ArgonPepper),
             DegreeOfParallelism = 4,
-            MemorySize = 65536,
-            Iterations = 3
+            MemorySize         = 65536,
+            Iterations         = 3
         };
 
         return argon2.GetBytes(32);
