@@ -82,44 +82,64 @@ export function decryptKeypairs(stored, passphrase) {
 }
 
 // Encrypt a plaintext message for a recipient.
-// Uses an ephemeral X25519 keypair per message (forward secrecy).
+// Construction: ephemeral X25519 DH → HKDF-SHA256 → ChaCha20-Poly1305-IETF.
+// Matches main's C++ Client::encryptFor exactly (RFC 5869 + RFC 8439).
 // Signs (ciphertext || nonce || ephemeralPK) with the sender's Ed25519 key.
 export function encryptMessage(plaintext, recipientPublicKeyB64, signingSecretKey) {
   const recipientPk = b64Decode(recipientPublicKeyB64);
-  const ephemeral   = sodium.crypto_box_keypair();
-  const nonce       = sodium.randombytes_buf(sodium.crypto_box_NONCEBYTES);
 
-  const ct = sodium.crypto_box_easy(
+  // 1. Ephemeral X25519 keypair — discarded after this call (forward secrecy)
+  const epkPair = sodium.crypto_box_keypair();
+  const epk     = epkPair.publicKey;
+  const esk     = epkPair.privateKey;
+
+  // 2. X25519 DH
+  const dhOut = sodium.crypto_scalarmult(esk, recipientPk);
+
+  // 3. HKDF-Extract: PRK = HMAC-SHA256(salt=epk, IKM=dhOut)
+  const prk = sodium.crypto_auth_hmacsha256(dhOut, epk);
+
+  // 4. HKDF-Expand: enc_key = HMAC-SHA256(key=PRK, msg="SecureMsg-v1-message-enc" || 0x01)
+  const infoBytes = new TextEncoder().encode('SecureMsg-v1-message-enc');
+  const infoBlock = new Uint8Array(infoBytes.length + 1);
+  infoBlock.set(infoBytes, 0);
+  infoBlock[infoBytes.length] = 0x01;
+  const encKey = sodium.crypto_auth_hmacsha256(infoBlock, prk);
+
+  // 5. ChaCha20-Poly1305-IETF encrypt (12-byte nonce per RFC 8439)
+  const nonce = sodium.randombytes_buf(sodium.crypto_aead_chacha20poly1305_ietf_NPUBBYTES);
+  const ct    = sodium.crypto_aead_chacha20poly1305_ietf_encrypt(
     sodium.from_string(plaintext),
+    null,  // no additional data
+    null,  // nsec unused
     nonce,
-    recipientPk,
-    ephemeral.privateKey
+    encKey
   );
 
-  // Sign the raw bytes (not base64) — matches C++ client
-  const signInput = new Uint8Array(ct.length + nonce.length + ephemeral.publicKey.length);
-  signInput.set(ct, 0);
+  // 6. Ed25519 sign (ciphertext || nonce || epk) — matches C++ sig_material
+  const signInput = new Uint8Array(ct.length + nonce.length + epk.length);
+  signInput.set(ct,    0);
   signInput.set(nonce, ct.length);
-  signInput.set(ephemeral.publicKey, ct.length + nonce.length);
-
+  signInput.set(epk,   ct.length + nonce.length);
   const signature = sodium.crypto_sign_detached(signInput, signingSecretKey);
 
   return {
-    ciphertext:        b64Encode(ct),
-    nonce:             b64Encode(nonce),
-    ephemeralPublicKey: b64Encode(ephemeral.publicKey),
-    signature:         b64Encode(signature),
+    ciphertext:         b64Encode(ct),
+    nonce:              b64Encode(nonce),
+    ephemeralPublicKey: b64Encode(epk),
+    signature:          b64Encode(signature),
   };
 }
 
-// Decrypt a message. Verifies Ed25519 signature if present and signing key is pinned.
+// Decrypt a message. Verifies Ed25519 signature before any DH or decryption.
+// Construction: HKDF-SHA256 key derivation → ChaCha20-Poly1305-IETF decrypt.
 // Throws a descriptive error on any failure.
 export function decryptMessage(msg, secretKey, signTofu) {
-  const ct         = b64Decode(msg.ciphertext);
-  const nonce      = b64Decode(msg.nonce);
+  const ct          = b64Decode(msg.ciphertext);
+  const nonce       = b64Decode(msg.nonce);
   const ephemeralPk = b64Decode(msg.ephemeralPublicKey);
 
-  // Verify signature if present and we have the sender's signing key pinned
+  // Verify signature BEFORE doing any DH — reject forged messages immediately
   if (msg.signature) {
     const pinnedKey = signTofu[msg.senderUsername];
     if (pinnedKey) {
@@ -127,8 +147,8 @@ export function decryptMessage(msg, secretKey, signTofu) {
       const sigPk    = b64Decode(pinnedKey);
 
       const signInput = new Uint8Array(ct.length + nonce.length + ephemeralPk.length);
-      signInput.set(ct, 0);
-      signInput.set(nonce, ct.length);
+      signInput.set(ct,          0);
+      signInput.set(nonce,       ct.length);
       signInput.set(ephemeralPk, ct.length + nonce.length);
 
       const valid = sodium.crypto_sign_verify_detached(sigBytes, signInput, sigPk);
@@ -141,6 +161,27 @@ export function decryptMessage(msg, secretKey, signTofu) {
     // If signing key not yet pinned, still decrypt but skip verification
   }
 
-  const plain = sodium.crypto_box_open_easy(ct, nonce, ephemeralPk, secretKey);
+  // X25519 DH: recipient's long-term secret key + sender's ephemeral public key
+  const dhOut = sodium.crypto_scalarmult(secretKey, ephemeralPk);
+
+  // HKDF-Extract: PRK = HMAC-SHA256(salt=epk, IKM=dhOut)
+  const prk = sodium.crypto_auth_hmacsha256(dhOut, ephemeralPk);
+
+  // HKDF-Expand: enc_key = HMAC-SHA256(key=PRK, msg="SecureMsg-v1-message-enc" || 0x01)
+  const infoBytes = new TextEncoder().encode('SecureMsg-v1-message-enc');
+  const infoBlock = new Uint8Array(infoBytes.length + 1);
+  infoBlock.set(infoBytes, 0);
+  infoBlock[infoBytes.length] = 0x01;
+  const encKey = sodium.crypto_auth_hmacsha256(infoBlock, prk);
+
+  // ChaCha20-Poly1305-IETF decrypt — throws on authentication tag failure
+  const plain = sodium.crypto_aead_chacha20poly1305_ietf_decrypt(
+    null,   // nsec unused
+    ct,
+    null,   // no additional data
+    nonce,
+    encKey
+  );
+
   return sodium.to_string(plain);
 }

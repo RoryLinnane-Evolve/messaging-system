@@ -48,7 +48,7 @@ public class MessageService : IMessageService
             Ciphertext = dto.Ciphertext,
             Nonce = dto.Nonce,
             EphemeralPublicKey = dto.EphemeralPublicKey,
-            Signature = dto.Signature
+            Signature = dto.Signature ?? string.Empty
         };
 
         _db.Messages.Add(message);

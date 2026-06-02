@@ -13,6 +13,8 @@ public interface IUserService
     Task<UserDto?> GetUser(string username);
     Task<bool> ChangePassword(Guid userId, ChangePasswordDto dto);
     Task DeleteUser(Guid userId);
+    Task<KeyBlobDto?> GetKeyBlob(Guid userId);
+    Task<bool> UpdateKeyBlob(Guid userId, UpdateKeyBlobDto dto);
 }
 
 public class UserService : IUserService
@@ -60,9 +62,28 @@ public class UserService : IUserService
         if (user == null)
             return;
 
-        // SenderId is nullable with SetNull — EF will null it out on delete
         _db.Users.Remove(user);
         await _db.SaveChangesAsync();
+    }
+
+    public async Task<KeyBlobDto?> GetKeyBlob(Guid userId)
+    {
+        var user = await _db.Users.FindAsync(userId);
+        if (user == null) return null;
+        return new KeyBlobDto { EncryptedKeyBlob = user.EncryptedKeyBlob };
+    }
+
+    public async Task<bool> UpdateKeyBlob(Guid userId, UpdateKeyBlobDto dto)
+    {
+        var user = await _db.Users.FindAsync(userId);
+        if (user == null) return false;
+
+        user.EncryptedKeyBlob = dto.EncryptedKeyBlob;
+        if (dto.PublicKey != null)       user.PublicKey       = dto.PublicKey;
+        if (dto.SigningPublicKey != null) user.SigningPublicKey = dto.SigningPublicKey;
+
+        await _db.SaveChangesAsync();
+        return true;
     }
 
     private byte[] HashPassword(string password, byte[] salt)

@@ -10,14 +10,14 @@ export default function NewConversation({ token, onCreated, onCancel }) {
     e.preventDefault();
     setError('');
 
-    const usernames = input.split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
-    if (usernames.length === 0) {
-      return setError('Enter at least one username.');
+    const username = input.trim();
+    if (!username) {
+      return setError('Enter a username.');
     }
 
     setLoading(true);
     try {
-      const conv = await api.createConversation(usernames, token);
+      const conv = await api.createConversation(username, token);
       onCreated(conv);
     } catch (err) {
       setError(err.message);
@@ -31,10 +31,10 @@ export default function NewConversation({ token, onCreated, onCancel }) {
       <h3>New Conversation</h3>
       <form onSubmit={handleSubmit} className="section">
         <div>
-          <label>Participant usernames (comma or space separated)</label>
+          <label>Recipient username</label>
           <input
             type="text"
-            placeholder="alice, bob"
+            placeholder="alice"
             value={input}
             onChange={e => setInput(e.target.value)}
             autoFocus

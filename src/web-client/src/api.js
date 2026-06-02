@@ -49,8 +49,8 @@ export const api = {
   getConversations: (token) =>
     request('GET', '/api/conversation', null, token),
 
-  createConversation: (participantUsernames, token) =>
-    request('POST', '/api/conversation', { participantUsernames }, token),
+  createConversation: (recipientUsername, token) =>
+    request('POST', '/api/conversation', { recipientUsername }, token),
 
   getConversationDigests: (conversationId, token) =>
     request('GET', `/api/conversation/${conversationId}/digests`, null, token),
