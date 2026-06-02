@@ -21,6 +21,9 @@ export default function Chat({
   const [sending, setSending]     = useState(false);
   const [tofuError, setTofuError] = useState('');
   const [recipient, setRecipient] = useState(null); // The other user's profile
+  const [revokeInput, setRevokeInput] = useState('');
+  const [revokeOpen, setRevokeOpen]   = useState(false);
+  const [revokeError, setRevokeError] = useState('');
   const bottomRef = useRef(null);
 
   // Find the other participant and load their profile (for TOFU + their public key)
@@ -146,18 +149,21 @@ export default function Chat({
     }
   }
 
-  async function handleRevoke() {
-    const targetUsername = window.prompt('Revoke access for username:');
+  async function handleRevoke(e) {
+    e.preventDefault();
+    setRevokeError('');
+    const targetUsername = revokeInput.trim();
     if (!targetUsername) return;
 
     try {
       const user = await api.getUser(targetUsername, token);
-      if (!user) return alert('User not found.');
+      if (!user) { setRevokeError('User not found.'); return; }
       await api.revokeAccess(conv.id, user.id, token);
-      alert(`Access revoked for ${targetUsername}.`);
+      setRevokeOpen(false);
+      setRevokeInput('');
       onRevoked();
     } catch (err) {
-      alert('Revoke failed: ' + err.message);
+      setRevokeError(err.message);
     }
   }
 
@@ -169,9 +175,24 @@ export default function Chat({
         <span><strong>{otherName}</strong></span>
         <div style={{ display: 'flex', gap: 6 }}>
           <button onClick={onVerify} title="Verify message integrity on blockchain">Verify</button>
-          <button onClick={handleRevoke}>Revoke access</button>
+          <button onClick={() => { setRevokeOpen(o => !o); setRevokeError(''); }}>Revoke access</button>
         </div>
       </div>
+
+      {revokeOpen && (
+        <form onSubmit={handleRevoke} style={{ display: 'flex', gap: 6, padding: '6px 12px', background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
+          <input
+            type="text"
+            placeholder="Username to revoke"
+            value={revokeInput}
+            onChange={e => setRevokeInput(e.target.value)}
+            autoFocus
+          />
+          <button type="submit">Revoke</button>
+          <button type="button" onClick={() => { setRevokeOpen(false); setRevokeInput(''); setRevokeError(''); }}>Cancel</button>
+          {revokeError && <span className="error" style={{ alignSelf: 'center' }}>{revokeError}</span>}
+        </form>
+      )}
 
       {tofuError && <div className="tofu-warning">{tofuError}</div>}
 

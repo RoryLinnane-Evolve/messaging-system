@@ -139,6 +139,13 @@ export default function App() {
               prev.some(m => m.id === data.id) ? prev : [...prev, data]
             );
           }
+        } else if (type === 'access_revoked') {
+          setConversations(prev => prev.filter(c => c.id !== data.conversationId));
+          if (selectedConvRef.current?.id === data.conversationId) {
+            setSelectedConv(null);
+            setMessages([]);
+            setView('conversations');
+          }
         }
       } catch {}
     };

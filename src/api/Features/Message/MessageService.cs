@@ -135,6 +135,8 @@ public class MessageService : IMessageService
 
         _db.ConversationParticipants.Remove(targetParticipant);
         await _db.SaveChangesAsync();
+
+        await _connections.SendToUser(targetUserId, new { type = "access_revoked", data = new { conversationId } });
         return true;
     }
 }
