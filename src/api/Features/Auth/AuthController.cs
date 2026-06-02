@@ -19,8 +19,15 @@ public class AuthController : ControllerBase
     [HttpPost("sign-up")]
     public async Task<ActionResult<RegistrationResult>> SignUp(RegisterDto dto)
     {
-        var result = await _authService.Register(dto);
-        return Ok(result);
+        try
+        {
+            var result = await _authService.Register(dto);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return Conflict(ex.Message);
+        }
     }
 
     [EnableRateLimiting("auth")]

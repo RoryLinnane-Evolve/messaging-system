@@ -30,6 +30,9 @@ public class AuthService : IAuthService
 
     public async Task<RegistrationResult> Register(RegisterDto dto)
     {
+        if (await _db.Users.AnyAsync(u => u.Username == dto.Username))
+            throw new InvalidOperationException("Username already taken.");
+
         var salt = RandomNumberGenerator.GetBytes(16);
         var hash = HashPassword(dto.Password, salt);
 
