@@ -117,6 +117,10 @@ public class MessageService : IMessageService
 
     public async Task<bool> RevokeAccess(Guid conversationId, Guid targetUserId, Guid requestingUserId)
     {
+        // Cannot revoke your own access
+        if (targetUserId == requestingUserId)
+            return false;
+
         var requestingParticipant = await _db.ConversationParticipants
             .FirstOrDefaultAsync(cp => cp.ConversationId == conversationId && cp.UserId == requestingUserId);
 

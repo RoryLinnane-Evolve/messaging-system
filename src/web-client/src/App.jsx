@@ -211,6 +211,7 @@ export default function App() {
               signTofu={signTofu}
               setSignTofu={setSignTofu}
               onVerify={() => setView('verify')}
+              onRevoked={refreshConversations}
             />
           )}
           {view === 'new-conversation' && (

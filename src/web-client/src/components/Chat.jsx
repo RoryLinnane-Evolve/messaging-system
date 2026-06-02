@@ -15,6 +15,7 @@ export default function Chat({
   signTofu,
   setSignTofu,
   onVerify,
+  onRevoked,
 }) {
   const [input, setInput]         = useState('');
   const [sending, setSending]     = useState(false);
@@ -146,14 +147,15 @@ export default function Chat({
   }
 
   async function handleRevoke() {
-    const targetUsername = window.prompt('Username to revoke from this conversation:');
+    const targetUsername = window.prompt('Revoke access for username:');
     if (!targetUsername) return;
 
     try {
       const user = await api.getUser(targetUsername, token);
       if (!user) return alert('User not found.');
       await api.revokeAccess(conv.id, user.id, token);
-      alert('Access revoked.');
+      alert(`Access revoked for ${targetUsername}.`);
+      onRevoked();
     } catch (err) {
       alert('Revoke failed: ' + err.message);
     }
