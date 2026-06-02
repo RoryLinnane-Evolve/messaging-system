@@ -128,7 +128,8 @@ export default function App() {
 
   // ── WebSocket ─────────────────────────────────────────────────────────────
   function connectWebSocket(jwt) {
-    const ws = new WebSocket(`ws://${window.location.host}/ws?token=${jwt}`);
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${wsProto}//${window.location.host}/ws?token=${jwt}`);
     ws.onmessage = (event) => {
       try {
         const { type, data } = JSON.parse(event.data);
