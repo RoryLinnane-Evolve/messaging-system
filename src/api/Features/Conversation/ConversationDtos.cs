@@ -21,3 +21,14 @@ public class CreateConversationDto
 {
     public string RecipientUsername { get; set; } = string.Empty;
 }
+
+public class ConversationDigestDto
+{
+    public Guid Id { get; set; }
+    public Guid ConversationId { get; set; }
+    public Guid FirstMessageId { get; set; }
+    public Guid LastMessageId { get; set; }
+    public string Hash { get; set; } = string.Empty;
+    public string TransactionHash { get; set; } = string.Empty;
+    public DateTime RecordedAt { get; set; }
+}

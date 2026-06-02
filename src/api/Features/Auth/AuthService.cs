@@ -35,11 +35,12 @@ public class AuthService : IAuthService
 
         var user = new Data.Entities.User
         {
-            Username = dto.Username,
-            PasswordHash = Convert.ToBase64String(hash),
-            Salt = Convert.ToBase64String(salt),
-            PublicKey = dto.PublicKey,
-            SigningPublicKey = dto.SigningPublicKey
+            Username         = dto.Username,
+            PasswordHash     = Convert.ToBase64String(hash),
+            Salt             = Convert.ToBase64String(salt),
+            PublicKey        = dto.PublicKey,
+            SigningPublicKey  = dto.SigningPublicKey,
+            EncryptedKeyBlob = dto.EncryptedKeyBlob,
         };
 
         _db.Users.Add(user);

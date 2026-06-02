@@ -152,6 +152,9 @@ namespace api.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<string>("EncryptedKeyBlob")
+                        .HasColumnType("text");
+
                     b.Property<string>("SigningPublicKey")
                         .IsRequired()
                         .HasColumnType("text");

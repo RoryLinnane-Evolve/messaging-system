@@ -46,4 +46,20 @@ public class UserController : ControllerBase
         await _userService.DeleteUser(UserId);
         return NoContent();
     }
+
+    [HttpGet("keys")]
+    public async Task<ActionResult<KeyBlobDto>> GetKeyBlob()
+    {
+        var result = await _userService.GetKeyBlob(UserId);
+        if (result is null) return NotFound();
+        return Ok(result);
+    }
+
+    [HttpPut("keys")]
+    public async Task<IActionResult> UpdateKeyBlob(UpdateKeyBlobDto dto)
+    {
+        var success = await _userService.UpdateKeyBlob(UserId, dto);
+        if (!success) return NotFound();
+        return NoContent();
+    }
 }

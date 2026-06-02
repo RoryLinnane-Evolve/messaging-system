@@ -82,7 +82,9 @@ static void menuMessages(Client& client) {
         size_t mi;
         try { mi = std::stoul(iStr); } catch (...) { return; }
         if (mi >= msgs.size()) return;
-        auto path = prompt("Save to file path: ");
+        auto msgId = msgs[mi].id;
+        auto prefix = msgId.size() >= 8 ? msgId.substr(0, 8) : msgId;
+        auto path = "message-" + prefix + ".txt";
         if (client.downloadMessage(msgs[mi], path))
             std::cout << "Saved to " << path << "\n";
     }

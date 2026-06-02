@@ -11,7 +11,7 @@ Messages are encrypted client-side before leaving the device. The server stores 
 | Component | Technology |
 |---|---|
 | API server | C# ASP.NET Core (.NET 10), EF Core, PostgreSQL |
-| Web client | Vanilla HTML/CSS/JS, libsodium-wrappers |
+| Web client | React 18, Vite, libsodium-wrappers |
 | C++ client | C++17, CMake, libsodium, libcurl |
 | Blockchain | Solidity, Ethereum Sepolia testnet |
 | Auth | JWT Bearer tokens, Argon2id password hashing |
@@ -19,22 +19,27 @@ Messages are encrypted client-side before leaving the device. The server stores 
 
 ### Encryption scheme
 
-Both clients use **libsodium `crypto_box_easy`** (X25519 key exchange + XSalsa20-Poly1305 AEAD), making messages interoperable across clients.
+Both clients use **ephemeral X25519 DH → HKDF-SHA256 → ChaCha20-Poly1305-IETF** for message encryption, with **Ed25519** detached signatures for sender authentication.
 
-- Each user generates an X25519 keypair on registration. The public key is stored on the server; the private key never leaves the client.
-- Each message uses a fresh ephemeral sender keypair, providing forward secrecy.
-- Nonces are 24 bytes generated from a CSPRNG, never reused.
-- Private keys are stored encrypted at rest using PBKDF2 (200,000 iterations, SHA-256) + AES-256-GCM.
+- Each user generates an X25519 encryption keypair and an Ed25519 signing keypair on registration. Both public keys are stored on the server; private keys never leave the client.
+- Each message uses a fresh ephemeral X25519 keypair, providing forward secrecy.
+- The raw DH output is passed through HKDF-SHA256 (RFC 5869) before use as a symmetric key.
+- Nonces are 12 bytes generated from a CSPRNG (OS entropy), never reused.
+- The sender signs `ciphertext || nonce || ephemeralPublicKey` with their Ed25519 signing key. Recipients verify the signature before decryption.
+- C++ client: private keys are stored encrypted at rest in `~/.securemsg_keys.bin` using Argon2id key derivation + XSalsa20-Poly1305.
+- Web client: private keys are stored as an Argon2id + XSalsa20-Poly1305 encrypted blob, optionally synced server-side for cross-session access.
+
+For full cryptographic justification see `docs/crypto-design.md` and `docs/primitive-decisions.md`.
 
 ### Trust model
 
 | Threat | Mitigation |
 |---|---|
 | Passive network attacker | TLS in transit |
-| Active network attacker | TLS + AEAD + sender authentication |
-| Honest-but-curious server | Server only stores ciphertext |
-| Compromised server | Cannot read or forge messages |
-| Key substitution (MITM) | TOFU — public key pinned on first fetch, mismatch aborts |
+| Active network attacker | TLS + ChaCha20-Poly1305 AEAD + Ed25519 sender authentication |
+| Honest-but-curious server | Server stores only ciphertext, nonce, ephemeral public key, and signature |
+| Compromised server | Cannot read ciphertext or forge valid Ed25519 signatures |
+| Key substitution (MITM) | TOFU — both encryption and signing keys pinned on first contact, mismatch aborts |
 
 ---
 
@@ -45,7 +50,10 @@ messaging-system/
 ├── docker-compose.yml          # Development stack
 ├── docker-compose.prod.yml     # Production stack (pulls from GHCR)
 ├── .env                        # Secrets — never committed
-├── resources/                  # Architecture docs, deployment guides
+├── docs/                       # Cryptographic design and justification
+│   ├── crypto-design.md
+│   ├── primitive-decisions.md
+│   └── trust-model.md
 ├── src/
 │   ├── api/                    # ASP.NET Core API
 │   │   ├── Config/             # Environment-based configuration
@@ -61,7 +69,7 @@ messaging-system/
 │   │   └── Profiles/           # AutoMapper mappings
 │   ├── contracts/              # Solidity smart contract
 │   ├── cpp-client/             # C++ CLI client
-│   └── web-client/             # Browser client
+│   └── web-client/             # React browser client
 ```
 
 ---
@@ -72,7 +80,7 @@ messaging-system/
 
 - Docker and Docker Compose
 - For the C++ client: `libcurl`, `libsodium`, `pkg-config`, CMake 3.20+
-- For the web client: any static file server (e.g. Python)
+- For the web client: Node.js 18+
 
 ### Start the API and database
 
@@ -87,10 +95,11 @@ The API is available at `http://localhost:8080`. Migrations run automatically on
 
 ```bash
 cd src/web-client
-python3 -m http.server 3000
+npm install
+npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open `http://localhost:5173`.
 
 ### C++ client
 
@@ -108,6 +117,8 @@ The client stores your keypair in `~/.securemsg_keys.bin` and TOFU pins in `~/.s
 HOME=/tmp/alice ./securemsg http://localhost:8080
 HOME=/tmp/bob   ./securemsg http://localhost:8080
 ```
+
+**Note:** The C++ client and web client maintain independent keypairs. A user registered on the C++ client cannot log in via the web client and vice versa.
 
 ---
 
@@ -129,12 +140,12 @@ All configuration is loaded from environment variables at startup. The applicati
 
 ## API endpoints
 
-All endpoints except registration and login require a `Bearer` token.
+All endpoints except registration and login require a `Bearer` token. Auth endpoints are rate-limited to 10 requests per minute per IP.
 
 ### Auth
 | Method | Path | Description |
 |---|---|---|
-| POST | `/api/auth/sign-up` | Register with username, password, and public key |
+| POST | `/api/auth/sign-up` | Register with username, password, encryption public key, and signing public key |
 | POST | `/api/auth/login` | Returns a JWT |
 | POST | `/api/auth/logout` | Client-side token discard (returns 204) |
 
@@ -143,7 +154,8 @@ All endpoints except registration and login require a `Bearer` token.
 |---|---|---|
 | GET | `/api/conversation` | List your conversations |
 | GET | `/api/conversation/{id}` | Get a conversation with messages |
-| POST | `/api/conversation` | Create a conversation |
+| POST | `/api/conversation` | Create a 1:1 conversation |
+| GET | `/api/conversation/{id}/digests` | List recorded blockchain digests for a conversation |
 
 ### Messages
 | Method | Path | Description |
@@ -157,16 +169,18 @@ All endpoints except registration and login require a `Bearer` token.
 ### Users
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/user/{username}` | Get a user's public profile and public key |
+| GET | `/api/user/{username}` | Get a user's public profile and public keys |
 | PUT | `/api/user/password` | Change password |
 | DELETE | `/api/user` | Delete account |
+| GET | `/api/user/keys` | Retrieve the authenticated user's encrypted key blob |
+| PUT | `/api/user/keys` | Store or update the authenticated user's encrypted key blob |
 
 ### WebSocket
 
 Connect to `/ws?token=<jwt>`. Send JSON frames:
 
 ```json
-{ "type": "send_message", "data": { "conversationId": "...", "ciphertext": "...", "nonce": "...", "ephemeralPublicKey": "..." } }
+{ "type": "send_message", "data": { "conversationId": "...", "ciphertext": "...", "nonce": "...", "ephemeralPublicKey": "...", "signature": "..." } }
 ```
 
 The server pushes `{ "type": "new_message", "data": { ...MessageDto } }` to all connected participants when a message is received.
@@ -182,9 +196,9 @@ Every tenth message in a conversation triggers a background job that:
 3. Calls `recordDigest(bytes32)` on the deployed Solidity contract
 4. Stores the transaction hash in `ConversationDigests`
 
-The contract is deployed on Ethereum Sepolia. Anyone can verify a digest by calling `getDigest(id)` on the contract and comparing it against the stored messages.
+The contract is deployed on Ethereum Sepolia. Digests can be retrieved via `GET /api/conversation/{id}/digests` and verified in the web client's built-in integrity verification panel.
 
-See `resources/smart-contract-deployment.md` for deployment instructions and `src/web-client/verify.html` for the standalone verification page.
+See `resources/smart-contract-deployment.md` for deployment instructions.
 
 ---
 
@@ -212,5 +226,7 @@ docker compose -f docker-compose.prod.yml up -d
 - Passwords are hashed with Argon2id (time=3, memory=65536 KiB, parallelism=4) with a random 16-byte salt and a server-side pepper.
 - All hash comparisons use `CryptographicOperations.FixedTimeEquals` to prevent timing attacks.
 - A dummy hash is always computed on login even when the username does not exist, preventing username enumeration via timing.
+- Auth endpoints are rate-limited (sliding window: 10 requests/minute per IP) to defend against brute-force attacks.
+- All API input is validated with data annotations; malformed requests are rejected before reaching service logic.
 - JWT tokens are validated on every request; the WebSocket endpoint validates the token from the query string before upgrading.
 - The `.env` file is listed in `.gitignore` and must never be committed.

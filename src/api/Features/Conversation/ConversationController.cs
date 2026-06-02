@@ -52,4 +52,12 @@ public class ConversationController : ControllerBase
             return BadRequest(ex.Message);
         }
     }
+
+    [HttpGet("{id:guid}/digests")]
+    public async Task<ActionResult<IEnumerable<ConversationDigestDto>>> GetDigests(Guid id)
+    {
+        var digests = await _conversationService.GetDigests(id, UserId);
+        if (digests is null) return NotFound();
+        return Ok(digests);
+    }
 }
