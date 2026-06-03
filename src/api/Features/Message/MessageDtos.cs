@@ -21,13 +21,17 @@ public class SendMessageDto
     public Guid ConversationId { get; set; }
 
     [Required]
+    [MaxLength(65536)]
     public string Ciphertext { get; set; } = string.Empty;
 
     [Required]
+    [MaxLength(256)]
     public string Nonce { get; set; } = string.Empty;
 
     [Required]
+    [MaxLength(256)]
     public string EphemeralPublicKey { get; set; } = string.Empty;
 
+    [MaxLength(256)]
     public string? Signature { get; set; }
 }

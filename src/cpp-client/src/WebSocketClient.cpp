@@ -13,11 +13,17 @@ void WebSocketClient::connect(const std::string& url) {
         switch (msg->type) {
             case ix::WebSocketMessageType::Open:
                 _connected = true;
+                std::cerr << "[WS] Connected\n";
                 break;
 
             case ix::WebSocketMessageType::Close:
+                _connected = false;
+                std::cerr << "[WS] Closed: " << msg->closeInfo.reason << "\n";
+                break;
+
             case ix::WebSocketMessageType::Error:
                 _connected = false;
+                std::cerr << "[WS] Error: " << msg->errorInfo.reason << "\n";
                 break;
 
             case ix::WebSocketMessageType::Message: {

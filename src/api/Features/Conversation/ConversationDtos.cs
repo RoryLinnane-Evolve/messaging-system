@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using api.Features.Message;
 
 namespace api.Features.Conversation;
@@ -19,6 +20,8 @@ public class ConversationItemDto
 
 public class CreateConversationDto
 {
+    [Required]
+    [MaxLength(50)]
     public string RecipientUsername { get; set; } = string.Empty;
 }
 

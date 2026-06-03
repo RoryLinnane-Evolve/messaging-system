@@ -6,7 +6,7 @@ public static class RealTimeMessageExtensions
     {
         app.UseWebSockets(new WebSocketOptions
         {
-            KeepAliveInterval = TimeSpan.FromSeconds(30)
+            KeepAliveInterval = TimeSpan.FromSeconds(15)
         });
 
         return app.UseMiddleware<RealTimeMiddleware>();
