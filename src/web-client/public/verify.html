@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SecureMsg — Message Integrity Verification</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.5/ethers.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: flex-start;
+      justify-content: center;
+      padding: 40px 16px;
+    }
+
+    .card {
+      background: #1a1f2e;
+      border: 1px solid #2d3748;
+      border-radius: 12px;
+      padding: 32px;
+      width: 100%;
+      max-width: 680px;
+    }
+
+    h1 { font-size: 1.4rem; font-weight: 600; margin-bottom: 4px; }
+    .subtitle { font-size: 0.85rem; color: #718096; margin-bottom: 28px; }
+
+    .field { margin-bottom: 20px; }
+    label { display: block; font-size: 0.8rem; color: #a0aec0; margin-bottom: 6px; font-weight: 500; letter-spacing: 0.03em; text-transform: uppercase; }
+
+    input, textarea {
+      width: 100%;
+      background: #0f1117;
+      border: 1px solid #2d3748;
+      border-radius: 6px;
+      color: #e2e8f0;
+      font-family: monospace;
+      font-size: 0.82rem;
+      padding: 10px 12px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input:focus, textarea:focus { border-color: #4a90d9; }
+    textarea { resize: vertical; min-height: 140px; }
+
+    button {
+      width: 100%;
+      background: #4a90d9;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: #357abd; }
+    button:disabled { background: #2d3748; color: #718096; cursor: not-allowed; }
+
+    .result {
+      margin-top: 24px;
+      border-radius: 8px;
+      padding: 20px;
+      border: 1px solid;
+      display: none;
+    }
+    .result.pass { background: #1a2e1a; border-color: #38a169; }
+    .result.fail { background: #2e1a1a; border-color: #e53e3e; }
+
+    .verdict {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-bottom: 16px;
+    }
+    .pass .verdict { color: #68d391; }
+    .fail .verdict { color: #fc8181; }
+
+    table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+    td { padding: 6px 0; vertical-align: top; }
+    td:first-child { color: #718096; width: 130px; white-space: nowrap; padding-right: 12px; }
+    td:last-child { font-family: monospace; word-break: break-all; }
+
+    .error {
+      margin-top: 16px;
+      background: #2e1a1a;
+      border: 1px solid #e53e3e;
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 0.82rem;
+      color: #fc8181;
+      display: none;
+    }
+
+    .info {
+      font-size: 0.78rem;
+      color: #718096;
+      margin-top: 10px;
+      line-height: 1.5;
+    }
+
+    a { color: #4a90d9; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Message Integrity Verification</h1>
+    <p class="subtitle">
+      Verify that a batch of messages has not been tampered with since it was recorded on
+      the Ethereum Sepolia testnet. No login required.
+    </p>
+
+    <div class="field">
+      <label>Transaction Hash</label>
+      <input
+        id="txHash"
+        type="text"
+        placeholder="0x..."
+        spellcheck="false"
+        autocomplete="off"
+      />
+      <p class="info">
+        The Ethereum transaction hash from when the digest was recorded.
+        Find this in the messaging app under <em>Verify → Recorded digests</em>.
+      </p>
+    </div>
+
+    <div class="field">
+      <label>Message Ciphertexts — one base64 value per line, in send order</label>
+      <textarea
+        id="ciphertexts"
+        placeholder="Paste ciphertexts here, one per line…"
+        spellcheck="false"
+      ></textarea>
+      <p class="info">
+        Each ciphertext is the base64-encoded encrypted content of a message, visible
+        in the messaging app when you save a message to file.
+      </p>
+    </div>
+
+    <button id="verifyBtn" onclick="verify()">Verify on Sepolia</button>
+
+    <div class="error" id="errorBox"></div>
+
+    <div class="result" id="resultBox">
+      <div class="verdict" id="verdict"></div>
+      <table>
+        <tbody id="resultTable"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const RPC_URL          = 'https://sepolia.infura.io/v3/4afc9a8ebfa5426393fbc1624cca0e42';
+    const CONTRACT_ADDRESS = '0x94Cb9083B3ACDCaCe25ebb3E29ceAE5bF436e850';
+
+    const EVENT_ABI = [
+      'event DigestRecorded(uint256 indexed id, bytes32 indexed hash, uint256 timestamp)'
+    ];
+
+    function computeLocalHash(ciphertexts) {
+      const combined  = ciphertexts.join('');
+      const utf8Bytes = ethers.toUtf8Bytes(combined);
+      return ethers.keccak256(utf8Bytes);
+    }
+
+    function showError(msg) {
+      const box = document.getElementById('errorBox');
+      box.textContent = msg;
+      box.style.display = 'block';
+      document.getElementById('resultBox').style.display = 'none';
+    }
+
+    function showResult(pass, onChainHash, localHash, timestamp, digestId) {
+      document.getElementById('errorBox').style.display = 'none';
+
+      const box = document.getElementById('resultBox');
+      box.className = 'result ' + (pass ? 'pass' : 'fail');
+      box.style.display = 'block';
+
+      document.getElementById('verdict').textContent = pass
+        ? '✓ PASS — Integrity verified. The messages have not been tampered with.'
+        : '✗ FAIL — Hash mismatch. The messages may have been altered since this digest was recorded.';
+
+      const date = new Date(Number(timestamp) * 1000).toUTCString();
+
+      document.getElementById('resultTable').innerHTML = `
+        <tr><td>Digest ID</td><td>${digestId}</td></tr>
+        <tr><td>Recorded at</td><td>${date}</td></tr>
+        <tr><td>On-chain hash</td><td>${onChainHash}</td></tr>
+        <tr><td>Computed hash</td><td>${localHash}</td></tr>
+      `;
+    }
+
+    async function verify() {
+      const txHash = document.getElementById('txHash').value.trim();
+      const rawCt  = document.getElementById('ciphertexts').value;
+      const btn    = document.getElementById('verifyBtn');
+
+      document.getElementById('errorBox').style.display = 'none';
+      document.getElementById('resultBox').style.display = 'none';
+
+      if (!txHash.startsWith('0x') || txHash.length !== 66) {
+        return showError('Enter a valid 66-character Ethereum transaction hash starting with 0x.');
+      }
+
+      const ctLines = rawCt.split('\n').map(l => l.trim()).filter(Boolean);
+      if (ctLines.length === 0) {
+        return showError('Paste at least one ciphertext.');
+      }
+
+      btn.disabled = true;
+      btn.textContent = 'Verifying…';
+
+      try {
+        const provider = new ethers.JsonRpcProvider(RPC_URL);
+        const receipt  = await provider.getTransactionReceipt(txHash);
+
+        if (!receipt) {
+          return showError('Transaction not found on Sepolia. Check the hash and try again.');
+        }
+
+        const iface = new ethers.Interface(EVENT_ABI);
+        let onChainHash, timestamp, digestId;
+
+        for (const log of receipt.logs) {
+          try {
+            const parsed = iface.parseLog(log);
+            if (parsed && parsed.name === 'DigestRecorded') {
+              digestId    = parsed.args.id.toString();
+              onChainHash = parsed.args.hash;
+              timestamp   = parsed.args.timestamp;
+              break;
+            }
+          } catch {}
+        }
+
+        if (!onChainHash) {
+          return showError('No DigestRecorded event found in this transaction. Make sure this is a digest transaction from SecureMsg.');
+        }
+
+        const localHash = computeLocalHash(ctLines);
+        const pass      = onChainHash.toLowerCase() === localHash.toLowerCase();
+
+        showResult(pass, onChainHash, localHash, timestamp, digestId);
+
+      } catch (err) {
+        showError('Error: ' + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Verify on Sepolia';
+      }
+    }
+  </script>
+</body>
+</html>

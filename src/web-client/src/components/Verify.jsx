@@ -2,28 +2,11 @@ import { useState, useEffect } from 'react';
 import { ethers } from 'ethers';
 import { api } from '../api';
 
-const RPC_URL          = 'https://sepolia.infura.io/v3/4afc9a8ebfa5426393fbc1624cca0e42';
-const CONTRACT_ADDRESS = '0x94Cb9083B3ACDCaCe25ebb3E29ceAE5bF436e850';
+const RPC_URL = 'https://sepolia.infura.io/v3/4afc9a8ebfa5426393fbc1624cca0e42';
 
-const ABI = [
-  {
-    inputs: [{ internalType: 'uint256', name: 'id', type: 'uint256' }],
-    name: 'getDigest',
-    outputs: [
-      { internalType: 'bytes32', name: 'hash',      type: 'bytes32' },
-      { internalType: 'uint256', name: 'timestamp', type: 'uint256' },
-    ],
-    stateMutability: 'view',
-    type: 'function',
-  },
-  {
-    inputs: [],
-    name: 'digestCount',
-    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
-    stateMutability: 'view',
-    type: 'function',
-  },
-];
+const EVENT_IFACE = new ethers.Interface([
+  'event DigestRecorded(uint256 indexed id, bytes32 indexed hash, uint256 timestamp)',
+]);
 
 // Hash computation must match BlockchainService.cs exactly:
 //   string.Concat(ciphertexts) → UTF-8 bytes → keccak256
@@ -34,14 +17,14 @@ function computeLocalHash(ciphertexts) {
 }
 
 export default function Verify({ token, selectedConv, messages, conversations = [] }) {
-  const [activeConvId, setActiveConvId] = useState(selectedConv?.id ?? '');
-  const [digests, setDigests]           = useState([]);
+  const [activeConvId, setActiveConvId]     = useState(selectedConv?.id ?? '');
+  const [digests, setDigests]               = useState([]);
   const [selectedDigest, setSelectedDigest] = useState(null);
-  const [digestId, setDigestId]         = useState('');
-  const [ciphertexts, setCiphertexts]   = useState('');
-  const [result, setResult]             = useState(null);
-  const [error, setError]               = useState('');
-  const [loading, setLoading]           = useState(false);
+  const [txHash, setTxHash]                 = useState('');
+  const [ciphertexts, setCiphertexts]       = useState('');
+  const [result, setResult]                 = useState(null);
+  const [error, setError]                   = useState('');
+  const [loading, setLoading]               = useState(false);
   const [digestsLoading, setDigestsLoading] = useState(false);
 
   // Sync dropdown with selectedConv when navigating from a chat
@@ -65,15 +48,13 @@ export default function Verify({ token, selectedConv, messages, conversations = 
       .finally(() => setDigestsLoading(false));
   }, [activeConvId]);
 
-  // When a digest record is selected, auto-populate the ciphertexts from
-  // the messages that fall between firstMessageId and lastMessageId.
   function selectDigest(digest) {
     setSelectedDigest(digest);
     setResult(null);
     setError('');
 
-    // Auto-populate the on-chain ID if we have it stored
-    if (digest.onChainId != null) setDigestId(String(digest.onChainId));
+    // Auto-populate the transaction hash from the stored record
+    setTxHash(digest.transactionHash);
 
     // Find the slice of messages for this digest
     const firstIdx = messages.findIndex(m => m.id === digest.firstMessageId);
@@ -91,8 +72,9 @@ export default function Verify({ token, selectedConv, messages, conversations = 
     e.preventDefault();
     setError(''); setResult(null);
 
-    const id = parseInt(digestId, 10);
-    if (isNaN(id)) return setError('Digest ID must be a number.');
+    const tx = txHash.trim();
+    if (!tx.startsWith('0x') || tx.length !== 66)
+      return setError('Enter a valid Ethereum transaction hash (0x + 64 hex characters).');
 
     const ctLines = ciphertexts.split('\n').map(l => l.trim()).filter(Boolean);
     if (ctLines.length === 0) return setError('Paste at least one ciphertext.');
@@ -100,19 +82,33 @@ export default function Verify({ token, selectedConv, messages, conversations = 
     setLoading(true);
     try {
       const provider = new ethers.JsonRpcProvider(RPC_URL);
-      const contract = new ethers.Contract(CONTRACT_ADDRESS, ABI, provider);
+      const receipt  = await provider.getTransactionReceipt(tx);
 
-      const [onChainHash, timestamp] = await contract.getDigest(id);
-      const localHash = computeLocalHash(ctLines);
-      const pass = onChainHash.toLowerCase() === localHash.toLowerCase();
+      if (!receipt)
+        return setError('Transaction not found on Sepolia. Check the hash and try again.');
 
-      setResult({ pass, onChainHash, localHash, timestamp, digestId: id });
-    } catch (err) {
-      if (err.message?.includes('bad result from backend')) {
-        setError('Digest ID not found on chain. Has this batch been recorded yet?');
-      } else {
-        setError('Error: ' + err.message);
+      let onChainHash, timestamp, digestId;
+      for (const log of receipt.logs) {
+        try {
+          const parsed = EVENT_IFACE.parseLog(log);
+          if (parsed && parsed.name === 'DigestRecorded') {
+            digestId    = parsed.args.id.toString();
+            onChainHash = parsed.args.hash;
+            timestamp   = parsed.args.timestamp;
+            break;
+          }
+        } catch {}
       }
+
+      if (!onChainHash)
+        return setError('No DigestRecorded event found in this transaction.');
+
+      const localHash = computeLocalHash(ctLines);
+      const pass      = onChainHash.toLowerCase() === localHash.toLowerCase();
+
+      setResult({ pass, onChainHash, localHash, timestamp, digestId });
+    } catch (err) {
+      setError('Error: ' + err.message);
     } finally {
       setLoading(false);
     }
@@ -123,11 +119,10 @@ export default function Verify({ token, selectedConv, messages, conversations = 
       <h3>Blockchain Integrity Verification</h3>
       <p style={{ fontSize: 12, color: '#555' }}>
         Every 10 messages, a keccak256 hash of the ciphertexts is recorded on Ethereum Sepolia.
-        Select a recorded digest below to auto-populate the ciphertexts, then enter the on-chain
-        digest ID (0-indexed) and verify.
+        Select a digest below to auto-populate, then verify against the chain.
       </p>
 
-      {/* Digest records for the selected conversation */}
+      {/* Conversation picker */}
       <div style={{ marginBottom: 8 }}>
         <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Conversation</label>
         <select
@@ -136,13 +131,13 @@ export default function Verify({ token, selectedConv, messages, conversations = 
           style={{ width: '100%' }}
         >
           <option value="">— select a conversation —</option>
-          {conversations.map(c => {
-            const label = c.participants.join(', ');
-            return <option key={c.id} value={c.id}>{label}</option>;
-          })}
+          {conversations.map(c => (
+            <option key={c.id} value={c.id}>{c.participants.join(', ')}</option>
+          ))}
         </select>
       </div>
 
+      {/* Digest list */}
       {activeConvId && (
         <>
           {digestsLoading && <p style={{ fontSize: 12 }}>Loading digests…</p>}
@@ -159,7 +154,7 @@ export default function Verify({ token, selectedConv, messages, conversations = 
                 onClick={() => selectDigest(d)}
               >
                 <div>
-                  {d.onChainId != null ? `Digest #${d.onChainId}` : 'Digest (ID unknown)'} — {new Date(d.recordedAt).toLocaleString()}
+                  {d.onChainId != null ? `Digest #${d.onChainId}` : 'Digest'} — {new Date(d.recordedAt).toLocaleString()}
                 </div>
                 <div className="hash-text">TX: {d.transactionHash}</div>
               </div>
@@ -172,14 +167,14 @@ export default function Verify({ token, selectedConv, messages, conversations = 
       <form onSubmit={handleVerify} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <div>
           <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-            On-chain Digest ID (0 = first batch, 1 = second, etc.)
+            Transaction Hash
           </label>
           <input
-            type="number"
-            min="0"
-            placeholder="e.g. 0"
-            value={digestId}
-            onChange={e => setDigestId(e.target.value)}
+            type="text"
+            placeholder="0x..."
+            value={txHash}
+            onChange={e => setTxHash(e.target.value)}
+            spellCheck={false}
           />
         </div>
         <div>
