@@ -33,28 +33,37 @@ function computeLocalHash(ciphertexts) {
   return ethers.keccak256(utf8Bytes);
 }
 
-export default function Verify({ token, selectedConv, messages }) {
+export default function Verify({ token, selectedConv, messages, conversations = [] }) {
+  const [activeConvId, setActiveConvId] = useState(selectedConv?.id ?? '');
   const [digests, setDigests]           = useState([]);
   const [selectedDigest, setSelectedDigest] = useState(null);
   const [digestId, setDigestId]         = useState('');
   const [ciphertexts, setCiphertexts]   = useState('');
-  const [result, setResult]             = useState(null);   // { pass, onChainHash, localHash, timestamp, digestId }
+  const [result, setResult]             = useState(null);
   const [error, setError]               = useState('');
   const [loading, setLoading]           = useState(false);
   const [digestsLoading, setDigestsLoading] = useState(false);
 
-  // Load digests for the selected conversation
+  // Sync dropdown with selectedConv when navigating from a chat
   useEffect(() => {
-    if (!selectedConv || !token) {
+    if (selectedConv?.id) setActiveConvId(selectedConv.id);
+  }, [selectedConv?.id]);
+
+  // Load digests whenever the active conversation changes
+  useEffect(() => {
+    if (!activeConvId || !token) {
       setDigests([]);
       return;
     }
+    setDigests([]);
+    setSelectedDigest(null);
+    setResult(null);
     setDigestsLoading(true);
-    api.getConversationDigests(selectedConv.id, token)
+    api.getConversationDigests(activeConvId, token)
       .then(setDigests)
       .catch(() => setDigests([]))
       .finally(() => setDigestsLoading(false));
-  }, [selectedConv?.id]);
+  }, [activeConvId]);
 
   // When a digest record is selected, auto-populate the ciphertexts from
   // the messages that fall between firstMessageId and lastMessageId.
@@ -62,6 +71,9 @@ export default function Verify({ token, selectedConv, messages }) {
     setSelectedDigest(digest);
     setResult(null);
     setError('');
+
+    // Auto-populate the on-chain ID if we have it stored
+    if (digest.onChainId != null) setDigestId(String(digest.onChainId));
 
     // Find the slice of messages for this digest
     const firstIdx = messages.findIndex(m => m.id === digest.firstMessageId);
@@ -71,7 +83,6 @@ export default function Verify({ token, selectedConv, messages }) {
       const batch = messages.slice(firstIdx, lastIdx + 1);
       setCiphertexts(batch.map(m => m.ciphertext).join('\n'));
     } else {
-      // Messages might not be loaded — show hash from DB as a hint
       setCiphertexts('');
     }
   }
@@ -117,11 +128,23 @@ export default function Verify({ token, selectedConv, messages }) {
       </p>
 
       {/* Digest records for the selected conversation */}
-      {selectedConv ? (
+      <div style={{ marginBottom: 8 }}>
+        <label style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>Conversation</label>
+        <select
+          value={activeConvId}
+          onChange={e => setActiveConvId(e.target.value)}
+          style={{ width: '100%' }}
+        >
+          <option value="">— select a conversation —</option>
+          {conversations.map(c => {
+            const label = c.participants.join(', ');
+            return <option key={c.id} value={c.id}>{label}</option>;
+          })}
+        </select>
+      </div>
+
+      {activeConvId && (
         <>
-          <strong style={{ fontSize: 12 }}>
-            Recorded digests for: {selectedConv.participants.join(', ')}
-          </strong>
           {digestsLoading && <p style={{ fontSize: 12 }}>Loading digests…</p>}
           {!digestsLoading && digests.length === 0 && (
             <p style={{ fontSize: 12, color: '#999' }}>
@@ -135,16 +158,14 @@ export default function Verify({ token, selectedConv, messages }) {
                 className={`digest-item${selectedDigest?.id === d.id ? ' selected' : ''}`}
                 onClick={() => selectDigest(d)}
               >
-                <div>Recorded: {new Date(d.recordedAt).toLocaleString()}</div>
+                <div>
+                  {d.onChainId != null ? `Digest #${d.onChainId}` : 'Digest (ID unknown)'} — {new Date(d.recordedAt).toLocaleString()}
+                </div>
                 <div className="hash-text">TX: {d.transactionHash}</div>
               </div>
             ))}
           </div>
         </>
-      ) : (
-        <p style={{ fontSize: 12, color: '#999' }}>
-          Select a conversation to auto-populate digests, or fill in manually below.
-        </p>
       )}
 
       {/* Verification form */}

@@ -86,6 +86,9 @@ using (var scope = app.Services.CreateScope())
     await db.Database.MigrateAsync();
 }
 
+// Backfill OnChainId for any legacy digest records — fire-and-forget, non-blocking
+app.Services.GetRequiredService<IBlockchainService>().ScheduleBackfill();
+
 app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();

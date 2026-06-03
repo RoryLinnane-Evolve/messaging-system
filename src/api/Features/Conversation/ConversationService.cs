@@ -115,6 +115,7 @@ public sealed class ConversationService : IConversationService
             LastMessageId   = d.LastMessageId,
             Hash            = d.Hash,
             TransactionHash = d.TransactionHash,
+            OnChainId       = d.OnChainId,
             RecordedAt      = d.RecordedAt,
         });
     }

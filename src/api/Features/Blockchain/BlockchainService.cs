@@ -1,8 +1,10 @@
+using System.Numerics;
 using System.Text;
 using api.Config;
 using api.Data;
 using api.Data.Entities;
 using Microsoft.EntityFrameworkCore;
+using Nethereum.ABI.FunctionEncoding.Attributes;
 using Nethereum.Hex.HexTypes;
 using Nethereum.Util;
 using Nethereum.Web3;
@@ -13,6 +15,7 @@ namespace api.Features.Blockchain;
 public interface IBlockchainService
 {
     void ScheduleDigestIfNeeded(Guid conversationId, int messageCount);
+    void ScheduleBackfill();
 }
 
 public class BlockchainService : IBlockchainService
@@ -38,9 +41,27 @@ public class BlockchainService : IBlockchainService
                 ],
                 "stateMutability": "view",
                 "type": "function"
+            },
+            {
+                "inputs": [],
+                "name": "digestCount",
+                "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+                "stateMutability": "view",
+                "type": "function"
             }
         ]
         """;
+
+    // Output DTO for getDigest — Nethereum deserialises the bytes32 return value into a byte[]
+    [FunctionOutput]
+    private class DigestOutput : IFunctionOutputDTO
+    {
+        [Parameter("bytes32", "hash", 1)]
+        public byte[] Hash { get; set; } = [];
+
+        [Parameter("uint256", "timestamp", 2)]
+        public BigInteger Timestamp { get; set; }
+    }
 
     private readonly Web3 _web3;
     private readonly string _contractAddress;
@@ -64,6 +85,11 @@ public class BlockchainService : IBlockchainService
         _ = Task.Run(() => WriteDigest(conversationId, messageCount));
     }
 
+    public void ScheduleBackfill()
+    {
+        _ = Task.Run(() => BackfillOnChainIds());
+    }
+
     private async Task WriteDigest(Guid conversationId, int messageCount)
     {
         try
@@ -82,6 +108,12 @@ public class BlockchainService : IBlockchainService
                 return;
 
             var hash = ComputeHash(messages);
+
+            // Query digestCount before recording — that value is the ID this digest will receive
+            var contract = _web3.Eth.GetContract(Abi, _contractAddress);
+            var countFn = contract.GetFunction("digestCount");
+            var onChainId = (int)(await countFn.CallAsync<BigInteger>());
+
             var txHash = await SendToChain(hash);
 
             db.ConversationDigests.Add(new ConversationDigest
@@ -90,7 +122,8 @@ public class BlockchainService : IBlockchainService
                 FirstMessageId = messages.First().Id,
                 LastMessageId = messages.Last().Id,
                 Hash = hash,
-                TransactionHash = txHash
+                TransactionHash = txHash,
+                OnChainId = onChainId,
             });
 
             await db.SaveChangesAsync();
@@ -99,6 +132,57 @@ public class BlockchainService : IBlockchainService
         {
             // Log but don't crash — blockchain write failure must not affect messaging
             Console.Error.WriteLine($"[Blockchain] Failed to write digest: {ex.Message}");
+        }
+    }
+
+    private async Task BackfillOnChainIds()
+    {
+        try
+        {
+            await using var scope = _scopeFactory.CreateAsyncScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+            var unmatched = await db.ConversationDigests
+                .Where(d => d.OnChainId == null)
+                .ToListAsync();
+
+            if (unmatched.Count == 0)
+                return;
+
+            Console.WriteLine($"[Blockchain] Backfilling OnChainId for {unmatched.Count} digest(s)…");
+
+            var contract   = _web3.Eth.GetContract(Abi, _contractAddress);
+            var countFn    = contract.GetFunction("digestCount");
+            var getDigestFn = contract.GetFunction("getDigest");
+
+            var count = (int)(await countFn.CallAsync<BigInteger>());
+
+            for (var i = 0; i < count; i++)
+            {
+                // Stop early if everything has been matched
+                if (unmatched.All(d => d.OnChainId != null))
+                    break;
+
+                try
+                {
+                    var result  = await getDigestFn.CallDeserializingToObjectAsync<DigestOutput>(new BigInteger(i));
+                    var hashHex = Convert.ToHexString(result.Hash).ToLowerInvariant();
+                    var match   = unmatched.FirstOrDefault(d => d.Hash == hashHex && d.OnChainId == null);
+                    if (match != null)
+                        match.OnChainId = i;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"[Blockchain] Backfill: failed to fetch digest {i}: {ex.Message}");
+                }
+            }
+
+            await db.SaveChangesAsync();
+            Console.WriteLine("[Blockchain] Backfill complete.");
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Blockchain] Backfill failed: {ex.Message}");
         }
     }
 

@@ -30,5 +30,6 @@ public class ConversationDigestDto
     public Guid LastMessageId { get; set; }
     public string Hash { get; set; } = string.Empty;
     public string TransactionHash { get; set; } = string.Empty;
+    public int? OnChainId { get; set; }
     public DateTime RecordedAt { get; set; }
 }

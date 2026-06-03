@@ -238,7 +238,7 @@ export default function App() {
             />
           )}
           {view === 'verify' && (
-            <Verify token={token} selectedConv={selectedConv} messages={messages} />
+            <Verify token={token} selectedConv={selectedConv} messages={messages} conversations={conversations} />
           )}
           {view === 'conversations' && (
             <div className="empty">Select a conversation or create a new one.</div>

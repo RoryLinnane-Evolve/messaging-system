@@ -16,6 +16,9 @@ public class ConversationDigest
     // Ethereum transaction hash — used to fetch and verify the on-chain record
     public required string TransactionHash { get; set; }
 
+    // Sequential index assigned by the smart contract — null for legacy records created before this field was added
+    public int? OnChainId { get; set; }
+
     public DateTime RecordedAt { get; set; } = DateTime.UtcNow;
 
     // Navigation properties
