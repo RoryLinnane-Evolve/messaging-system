@@ -1,0 +1,12 @@
+# Use of AI reflection - Rory Linnane
+
+---
+I found that the use of AI in this project was hugely benificial for rapid development work. In the beginning, I started out with writing out basic workflows and activity diagrams on paper, then brainstorming with claude on the specifics, and then finally I would write the Interfaces to be implemented. After this I would give these interfaces to claude code for it to implement. Claude also had access to the project spec to ensure I wasn't breaking any rules, or going out of scope. Intermittantly I would ask claude to do a gap analysis between the current state of the project and what the requirements of the spec were. This was very benificial to ensure I was staying on track to complete what was required.
+
+I did find that sometimes when debugging issues with deployment, claude would come back with the complete wrong answer, however I didn't see this as the fault of claude on its own. Rather this was my fault for failing to provide apt context. This is a large shortfall of claude code, the fact that it doesn't quite have human level pattern recognition for certain things. So it is very important to keep the agent informed of your manual testing methods when using a hybrid approach.
+
+## Evidence of Critical Evaluation of AI-Generated Code
+
+There were a few instances where I had to reject or correct AI output. The most notable was during WebSocket debugging, where Claude initially blamed the Caddy configuration and suggested changes that made things worse. I reverted them and pushed back. Eventually, by directing Claude to read the IXWebSocket source directly, it found the real cause — the library was sending `Host: teamwfh.theburkenator.com:443`, violating RFC 7230, which caused the course infrastructure to reject the connection before it ever reached Caddy.
+
+Similarly, after deploying a new API image, Claude told me `docker compose up -d` was sufficient. The server continued running the old image. I had to investigate the Docker state manually to figure out that `docker compose pull` was needed first. These situations highlighted that Claude's suggestions are a starting point, not a final answer, especially when infrastructure and external systems are involved.
