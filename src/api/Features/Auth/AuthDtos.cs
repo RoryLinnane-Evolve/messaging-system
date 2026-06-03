@@ -31,6 +31,7 @@ public sealed class RegisterDto
 public sealed class LogInDto
 {
     [Required]
+    [MaxLength(50)]
     public string Username { get; set; } = string.Empty;
 
     [Required]
