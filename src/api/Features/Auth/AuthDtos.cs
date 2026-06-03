@@ -34,5 +34,6 @@ public sealed class LogInDto
     public string Username { get; set; } = string.Empty;
 
     [Required]
+    [MaxLength(128)]
     public string Password { get; set; } = string.Empty;
 }
