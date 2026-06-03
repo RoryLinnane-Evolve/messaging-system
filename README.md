@@ -86,3 +86,20 @@ To connect to the hosted server:
 HOME=/tmp/alice ./securemsg https://teamwfh.theburkenator.com
 HOME=/tmp/bob   ./securemsg https://teamwfh.theburkenator.com
 ```
+
+---
+
+## Blockchain & Message Integrity
+
+The server records a keccak256 digest of every 10-message batch to the **`MessageDigest`** smart contract on Ethereum Sepolia.
+
+| Field | Value |
+|-------|-------|
+| Network | Ethereum Sepolia Testnet |
+| Contract address | `0x94Cb9083B3ACDCaCe25ebb3E29ceAE5bF436e850` |
+| Etherscan | https://sepolia.etherscan.io/address/0x94Cb9083B3ACDCaCe25ebb3E29ceAE5bF436e850 |
+| Source | `src/contracts/MessageDigest.sol` |
+
+### Verification page
+
+Open `src/web-client/public/verify.html` in any browser — no login or local server required. Paste a transaction hash and the ciphertexts from the batch to verify integrity against the on-chain digest.
