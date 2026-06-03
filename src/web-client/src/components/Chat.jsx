@@ -127,26 +127,20 @@ export default function Chat({
   }
 
   function handleSave(msg) {
-    try {
-      const plaintext = decryptMessage(msg, keys.secretKey, signTofu);
-      const content = [
-        `From:      ${msg.senderUsername}`,
-        `Timestamp: ${msg.timestamp}`,
-        `MessageID: ${msg.id}`,
-        '---',
-        plaintext,
-      ].join('\n');
+    const content = [
+      `From:      ${msg.senderUsername}`,
+      `Timestamp: ${msg.timestamp}`,
+      `MessageID: ${msg.id}`,
+      `Ciphertext: ${msg.ciphertext}`,
+    ].join('\n');
 
-      const blob = new Blob([content], { type: 'text/plain' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      a.href     = url;
-      a.download = `message-${msg.id.slice(0, 8)}.txt`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      alert('Could not decrypt message: ' + err.message);
-    }
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = `message-${msg.id.slice(0, 8)}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   }
 
   async function handleRevoke(e) {
